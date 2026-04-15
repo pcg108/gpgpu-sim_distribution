@@ -1394,6 +1394,8 @@ class baseline_cache : public cache_t {
     m_tag_array->fill(addr, time, mask, byte_mask, true);
   }
 
+  void log_l1_to_l2_request(mem_fetch *mf);
+
  protected:
   // Constructor that can be used by derived classes with custom tag arrays
   baseline_cache(const char *name, cache_config &config, int core_id,

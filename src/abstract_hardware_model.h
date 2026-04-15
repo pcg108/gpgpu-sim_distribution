@@ -587,6 +587,10 @@ class kernel_info_t {
            m_next_tid.x < m_block_dim.x;
   }
   unsigned get_uid() const { return m_uid; }
+  unsigned get_trace_kernel_id() const { return m_trace_kernel_id; }
+  void set_trace_kernel_id(unsigned trace_kernel_id) {
+    m_trace_kernel_id = trace_kernel_id;
+  }
   unsigned long long get_streamID() const { return m_streamID; }
   std::string get_name() const { return name(); }
   std::string name() const;
@@ -620,6 +624,7 @@ class kernel_info_t {
   class function_info *m_kernel_entry;
 
   unsigned m_uid;  // Kernel ID
+  unsigned m_trace_kernel_id;  // Stable kernel id parsed from trace headers
   unsigned long long m_streamID;
 
   // These maps contain the snapshot of the texture mappings at kernel launch
@@ -1469,6 +1474,9 @@ class warp_inst_t : public inst_t {
   warp_inst_t() {
     m_uid = 0;
     m_streamID = (unsigned long long)-1;
+    m_sm_id = (unsigned)-1;
+    m_sched_id = (unsigned)-1;
+    m_kernel_uid = (unsigned)-1;
     m_empty = true;
     m_config = NULL;
 
@@ -1491,6 +1499,9 @@ class warp_inst_t : public inst_t {
   warp_inst_t(const core_config *config) {
     m_uid = 0;
     m_streamID = (unsigned long long)-1;
+    m_sm_id = (unsigned)-1;
+    m_sched_id = (unsigned)-1;
+    m_kernel_uid = (unsigned)-1;
     assert(config->warp_size <= MAX_WARP_SIZE);
     m_config = config;
     m_empty = true;
@@ -1532,7 +1543,7 @@ class warp_inst_t : public inst_t {
 
   void issue(const active_mask_t &mask, unsigned warp_id,
              unsigned long long cycle, int dynamic_warp_id, int sch_id,
-             unsigned long long streamID);
+             unsigned long long streamID, int sm_id, int scheduler_id);
 
   const active_mask_t &get_active_mask() const { return m_warp_active_mask; }
   void completed(unsigned long long cycle)
@@ -1718,6 +1729,15 @@ class warp_inst_t : public inst_t {
     m_tma_multicast_cta_mask = tma_multicast_cta_mask;
   }
 
+  // Logging metadata for the dynamic instruction.
+  unsigned get_sm_id() const { return m_sm_id; }
+  unsigned get_scheduler_id() const { return m_sched_id; }
+  unsigned get_kernel_uid() const { return m_kernel_uid; }
+
+  const std::string &get_kernel_name() const { return m_kernel_name; }
+  void set_kernel_uid(unsigned uid) { m_kernel_uid = uid; }
+  void set_kernel_name(const std::string &name) { m_kernel_name = name; }
+
  protected:
   unsigned m_uid;
   unsigned long long m_streamID;
@@ -1749,6 +1769,12 @@ class warp_inst_t : public inst_t {
   std::vector<mem_access_t> m_accessq;
 
   unsigned m_scheduler_id;  // the scheduler that issues this inst
+
+  unsigned m_sm_id;
+  unsigned m_sched_id;
+  unsigned m_kernel_uid;
+
+  std::string m_kernel_name;  // kernel name for tracing
 
   // Jin: cdp support
  public:

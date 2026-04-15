@@ -44,6 +44,7 @@
 
 // Intended to be called from inside components of a memory partition
 // Depends on a get_mpid() function
+/*
 #define MEMPART_DPRINTF(...)                                                   \
   do {                                                                         \
     if (MEMPART_DTRACE(MEMORY_PARTITION_UNIT)) {                               \
@@ -53,7 +54,29 @@
       printf(__VA_ARGS__);                                                     \
     }                                                                          \
   } while (0)
+*/
+#define MEMPART_DPRINTF(...)                                                   \
+  do {                                                                         \
+    if (MEMPART_DTRACE(MEMORY_PARTITION_UNIT)) {                               \
+      static FILE* mempart_trace_file = NULL;                                  \
+      if (mempart_trace_file == NULL) {                                        \
+        const char* trace_path = getenv("MEMPART_TRACE_FILE");                 \
+        if (trace_path == NULL) trace_path = "/tmp/mempart_trace.log";         \
+        mempart_trace_file = fopen(trace_path, "w");                           \
+      }                                                                        \
+      if (mempart_trace_file != NULL) {                                        \
+        fprintf(                                                               \
+            mempart_trace_file,                                                \
+            MEMPART_PRINT_STR, m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,\
+            Trace::trace_streams_str[Trace::MEMORY_PARTITION_UNIT], get_mpid()); \
+        fprintf(mempart_trace_file, __VA_ARGS__);                              \
+        fflush(mempart_trace_file);                                            \
+      }                                                                        \
+    }                                                                          \
+  } while (0)
 
+
+/*
 #define MEM_SUBPART_DPRINTF(...)                                               \
   do {                                                                         \
     if (MEM_SUBPART_DTRACE(MEMORY_PARTITION_UNIT)) {                           \
@@ -61,6 +84,26 @@
              m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,                  \
              Trace::trace_streams_str[Trace::MEMORY_SUBPARTITION_UNIT], m_id); \
       printf(__VA_ARGS__);                                                     \
+    }                                                                          \
+  } while (0)
+*/
+
+#define MEM_SUBPART_DPRINTF(...)                                               \
+  do {                                                                         \
+    if (MEM_SUBPART_DTRACE(MEMORY_PARTITION_UNIT)) {                           \
+      static FILE* mempart_trace_file = NULL;                                  \
+      if (mempart_trace_file == NULL) {                                        \
+        const char* trace_path = getenv("MEMPART_TRACE_FILE");                 \
+        if (trace_path == NULL) trace_path = "/tmp/memsubpart_trace.log";         \
+        mempart_trace_file = fopen(trace_path, "w");                           \
+      }                                                                        \
+      if (mempart_trace_file != NULL) {                                        \
+        fprintf(mempart_trace_file, MEM_SUBPART_PRINT_STR,                     \
+               m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,                \
+               Trace::trace_streams_str[Trace::MEMORY_SUBPARTITION_UNIT], m_id);\
+        fprintf(mempart_trace_file, __VA_ARGS__);                              \
+        fflush(mempart_trace_file);                                            \
+      }                                                                        \
     }                                                                          \
   } while (0)
 
