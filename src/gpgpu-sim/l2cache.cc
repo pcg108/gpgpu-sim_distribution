@@ -470,18 +470,17 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
       if (mf->get_access_type() !=
           L2_WR_ALLOC_R) {  // Don't pass write allocate read request back to
                             // upper level cache
+        mf->set_l2_fill_complete_cycle(cycle);
         mf->set_reply();
-        mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,
-                       m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+        mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE, cycle);
         m_L2_icnt_queue->push(mf);
       } else {
         if (m_config->m_L2_config.m_write_alloc_policy == FETCH_ON_WRITE) {
           mem_fetch *original_wr_mf = mf->get_original_wr_mf();
           assert(original_wr_mf);
+          original_wr_mf->set_l2_fill_complete_cycle(cycle);
           original_wr_mf->set_reply();
-          original_wr_mf->set_status(
-              IN_PARTITION_L2_TO_ICNT_QUEUE,
-              m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+          original_wr_mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE, cycle);
           m_L2_icnt_queue->push(original_wr_mf);
         }
         m_request_tracker.erase(mf);
@@ -502,6 +501,7 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
         m_dram_L2_queue->pop();
       }
     } else if (!m_L2_icnt_queue->full()) {
+      mf->set_l2_fill_complete_cycle(cycle);
       if (mf->is_write() && mf->get_type() == WRITE_ACK)
         mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,
                        m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
@@ -542,6 +542,7 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
               m_request_tracker.erase(mf);
               delete mf;
             } else {
+              mf->set_l2_fill_complete_cycle(cycle);
               mf->set_reply();
               mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,
                              m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
@@ -562,6 +563,7 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
               m_request_tracker.erase(mf);
               delete mf;
             } else if (m_config->m_L2_config.get_write_policy() == WRITE_BACK) {
+              mf->set_l2_fill_complete_cycle(cycle);
               mf->set_reply();
               mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,
                              m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);

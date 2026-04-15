@@ -96,6 +96,7 @@ class mem_fetch {
   unsigned get_sid() const { return m_sid; }
   unsigned get_tpc() const { return m_tpc; }
   unsigned get_wid() const { return m_wid; }
+  unsigned get_dynamic_wid() const { return m_dynamic_wid; }
   bool istexture() const;
   bool isconst() const;
   enum mf_type get_type() const { return m_type; }
@@ -103,9 +104,21 @@ class mem_fetch {
 
   void set_return_timestamp(unsigned t) { m_timestamp2 = t; }
   void set_icnt_receive_time(unsigned t) { m_icnt_receive_time = t; }
+  void set_l2_memport_push_cycle(unsigned long long t) {
+    m_l2_memport_push_cycle = t;
+  }
+  void set_l2_fill_complete_cycle(unsigned long long t) {
+    m_l2_fill_complete_cycle = t;
+  }
   unsigned get_timestamp() const { return m_timestamp; }
   unsigned get_return_timestamp() const { return m_timestamp2; }
   unsigned get_icnt_receive_time() const { return m_icnt_receive_time; }
+  unsigned long long get_l2_memport_push_cycle() const {
+    return m_l2_memport_push_cycle;
+  }
+  unsigned long long get_l2_fill_complete_cycle() const {
+    return m_l2_fill_complete_cycle;
+  }
   unsigned long long get_streamID() const { return m_streamID; }
 
   enum mem_access_type get_access_type() const { return m_access.get_type(); }
@@ -136,6 +149,7 @@ class mem_fetch {
   unsigned m_sid;
   unsigned m_tpc;
   unsigned m_wid;
+  unsigned m_dynamic_wid;
 
   // where is this request now?
   enum mem_fetch_status m_status;
@@ -161,6 +175,10 @@ class mem_fetch {
                           // onto icnt to shader; only used for reads
   unsigned m_icnt_receive_time;  // set to gpu_sim_cycle + interconnect_latency
                                  // when fixed icnt latency mode is enabled
+  unsigned long long m_l2_memport_push_cycle;  // cycle when request is sent from
+                                                // L1 cache miss queue to L2
+  unsigned long long m_l2_fill_complete_cycle;  // cycle when an L2 miss response
+                                                 // becomes ready at L2
 
   // requesting instruction (put last so mem_fetch prints nicer in gdb)
   warp_inst_t m_inst;

@@ -32,9 +32,12 @@
 
 #include "gpu-cache.h"
 #include <assert.h>
+#include <set>
+#include <string>
 #include "gpu-sim.h"
 #include "hashing.h"
 #include "stat-tool.h"
+#include "trace_file_manager.h"
 
 // used to allocate memory that is large enough to adapt the changes in cache
 // size across kernels
@@ -1211,12 +1214,102 @@ bool baseline_cache::bandwidth_management::fill_port_free() const {
   return (m_fill_port_occupied_cycles == 0);
 }
 
+/// Log L1 to L2 memory requests
+void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
+  // Only log if L1_TRACE_DIR environment variable is set
+  static const char *trace_dir = getenv("L1_TRACE_DIR");
+  if (trace_dir == nullptr) return;
+
+  // Check if this is an L1 writeback - if so, use original_mf for instruction info
+  bool is_l1_writeback = (mf->get_access_type() == L1_WRBK_ACC);
+  mem_fetch *info_mf = mf;
+  if (is_l1_writeback && mf->get_original_mf() != nullptr) {
+    info_mf = mf->get_original_mf();
+  }
+
+  // Get instruction info from mem_fetch (or original_mf for writebacks)
+  unsigned sm_id = info_mf->get_sid();
+  unsigned dynamic_warp_id = info_mf->get_dynamic_wid();
+  address_type pc = info_mf->get_pc();
+  new_addr_type addr = mf->get_addr();  // Use actual writeback address
+  unsigned access_size = mf->get_access_size();  // Use actual writeback size
+  bool is_write = mf->get_is_write();
+
+  unsigned sub_partition_id = info_mf->get_sub_partition_id();
+  unsigned set_index = m_config.set_index(addr);
+  new_addr_type tag = m_config.tag(addr);
+  std::bitset sector_mask = mf->get_access_sector_mask();
+  
+  // Get scheduler ID from instruction if available
+  unsigned scheduler_id = 0;
+  unsigned kernel_uid = (unsigned)-1;
+  std::string kernel_name = "unknown_kernel";
+  if (!info_mf->get_inst().empty()) {
+    scheduler_id = info_mf->get_inst().get_scheduler_id();
+    kernel_uid = info_mf->get_inst().get_kernel_uid();
+    if (!info_mf->get_inst().get_kernel_name().empty()) {
+      kernel_name = info_mf->get_inst().get_kernel_name();
+    }
+  }
+
+  // Create folder structure:
+  // <L1_TRACE_DIR>/kernel_<uid>_<name>/shader_<id>/scheduler_<id>/
+  ensure_directory_exists(trace_dir);
+
+  char kernel_folder[1024];
+  snprintf(kernel_folder, sizeof(kernel_folder), "%s/kernel_%u_%s", trace_dir,
+           kernel_uid, kernel_name.c_str());
+  ensure_directory_exists(kernel_folder);
+
+  char shader_folder[1536];
+  snprintf(shader_folder, sizeof(shader_folder),
+           "%s/shader_%u", kernel_folder, sm_id);
+  ensure_directory_exists(shader_folder);
+
+  char scheduler_folder[2048];
+  snprintf(scheduler_folder, sizeof(scheduler_folder),
+           "%s/scheduler_%u", shader_folder, scheduler_id);
+  ensure_directory_exists(scheduler_folder);
+
+  char filename[2560];
+  snprintf(filename, sizeof(filename), "%s/l1_to_l2_requests.txt", scheduler_folder);
+
+  // Format the log line
+  const char *access_type;
+  if (is_l1_writeback) {
+    access_type = "WRITEBACK";
+  } else if (is_write) {
+    access_type = "WRITE";
+  } else {
+    access_type = "READ";
+  }
+
+  char line[512];
+  snprintf(
+      line, sizeof(line),
+      "request_uid=%u PC=0x%08x dynamic_warp=%u addr=0x%llx  subpartition=%u "
+      "set_index=%u tag=0x%llx sector_mask=0x%llx size=%u type=%s "
+      "l1_to_l2_cycle=%llu\n",
+      mf->get_request_uid(), pc, dynamic_warp_id, (unsigned long long)addr,
+      sub_partition_id, set_index, (unsigned long long)tag,
+      (unsigned long long)sector_mask.to_ullong(), access_size, access_type,
+      mf->get_l2_memport_push_cycle());
+
+  TraceFileManager::instance().write_line(filename, line);
+}
+
 /// Sends next request to lower level of memory
 void baseline_cache::cycle() {
   if (!m_miss_queue.empty()) {
     mem_fetch *mf = m_miss_queue.front();
     if (!m_memport->full(mf->size(), mf->get_is_write())) {
       m_miss_queue.pop_front();
+      // Log L1 to L2 requests only
+      if (m_level == L1_GPU_CACHE) {
+        mf->set_l2_memport_push_cycle(m_gpu->gpu_tot_sim_cycle +
+                                      m_gpu->gpu_sim_cycle);
+        log_l1_to_l2_request(mf);
+      }
       m_memport->push(mf);
     }
   }
@@ -1583,7 +1676,7 @@ enum cache_request_status data_cache::wr_miss_wa_naive(
           evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
           evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
           true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
-          NULL, mf->get_streamID());
+          mf, mf->get_streamID());
       // the evicted block may have wrong chip id when advanced L2 hashing  is
       // used, so set the right chip address from the original mf
       wb->set_chip(mf->get_tlx_addr().chip);
@@ -1637,7 +1730,7 @@ enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
             evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
             evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
             true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
-            NULL, mf->get_streamID());
+            mf, mf->get_streamID());
         // the evicted block may have wrong chip id when advanced L2 hashing  is
         // used, so set the right chip address from the original mf
         wb->set_chip(mf->get_tlx_addr().chip);
@@ -1714,7 +1807,7 @@ enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
             evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
             evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
             true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
-            NULL, mf->get_streamID());
+            mf, mf->get_streamID());
         // the evicted block may have wrong chip id when advanced L2 hashing  is
         // used, so set the right chip address from the original mf
         wb->set_chip(mf->get_tlx_addr().chip);
@@ -1782,7 +1875,7 @@ enum cache_request_status data_cache::wr_miss_wa_lazy_fetch_on_read(
           evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
           evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
           true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
-          NULL, mf->get_streamID());
+          mf, mf->get_streamID());
       // the evicted block may have wrong chip id when advanced L2 hashing  is
       // used, so set the right chip address from the original mf
       wb->set_chip(mf->get_tlx_addr().chip);
@@ -1862,11 +1955,13 @@ enum cache_request_status data_cache::rd_miss_base(
     // If evicted block is modified and not a write-through
     // (already modified lower level)
     if (wb && (m_config.m_write_policy != WRITE_THROUGH)) {
+
       mem_fetch *wb = m_memfetch_creator->alloc(
           evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
           evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
           true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1, -1, -1,
-          NULL, mf->get_streamID());
+          mf, mf->get_streamID());
+
       // the evicted block may have wrong chip id when advanced L2 hashing  is
       // used, so set the right chip address from the original mf
       wb->set_chip(mf->get_tlx_addr().chip);

@@ -383,7 +383,7 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
                  register_set *dp_out, register_set *sfu_out,
                  register_set *int_out, register_set *tensor_core_out,
                  std::vector<register_set *> &spec_cores_out,
-                 register_set *mem_out, int id)
+                 register_set *mem_out, int id, unsigned warp_size)
       : m_supervised_warps(),
         m_stats(stats),
         m_shader(shader),
@@ -397,7 +397,9 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
         m_tensor_core_out(tensor_core_out),
         m_mem_out(mem_out),
         m_spec_cores_out(spec_cores_out),
-        m_id(id) {}
+        m_id(id),
+        m_shader_cycle_distro(warp_size + 3, 0),
+        m_last_logged_shader_cycle_distro(warp_size + 3, 0) {}
   virtual ~scheduler_unit() {}
   virtual void add_supervised_warp_id(int i) {
     m_supervised_warps.push_back(&warp(i));
@@ -411,6 +413,10 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
   // modified by changing the contents of the m_next_cycle_prioritized_warps
   // list.
   void cycle();
+  void log_issue_cycle(unsigned active_count);
+  void log_no_issue_cycle(unsigned bucket);
+  void print_shader_cycle_distro(FILE *fout, unsigned cluster_id,
+                                 unsigned core_id);
 
   // These are some common ordering fucntions that the
   // higher order schedulers can take advantage of
@@ -488,6 +494,8 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
   unsigned m_current_turn_warp;
 
   int m_id;
+  std::vector<unsigned> m_shader_cycle_distro;
+  std::vector<unsigned> m_last_logged_shader_cycle_distro;
 };
 
 class lrr_scheduler : public scheduler_unit {
@@ -498,10 +506,10 @@ class lrr_scheduler : public scheduler_unit {
                 register_set *dp_out, register_set *sfu_out,
                 register_set *int_out, register_set *tensor_core_out,
                 std::vector<register_set *> &spec_cores_out,
-                register_set *mem_out, int id)
+                register_set *mem_out, int id, unsigned warp_size)
       : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                        sfu_out, int_out, tensor_core_out, spec_cores_out,
-                       mem_out, id) {}
+                       mem_out, id, warp_size) {}
   virtual ~lrr_scheduler() {}
   virtual void order_warps();
   virtual void done_adding_supervised_warps() {
@@ -517,10 +525,10 @@ class rrr_scheduler : public scheduler_unit {
                 register_set *dp_out, register_set *sfu_out,
                 register_set *int_out, register_set *tensor_core_out,
                 std::vector<register_set *> &spec_cores_out,
-                register_set *mem_out, int id)
+                register_set *mem_out, int id, unsigned warp_size)
       : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                        sfu_out, int_out, tensor_core_out, spec_cores_out,
-                       mem_out, id) {}
+                       mem_out, id, warp_size) {}
   virtual ~rrr_scheduler() {}
   virtual void order_warps();
   virtual void done_adding_supervised_warps() {
@@ -536,10 +544,10 @@ class gto_scheduler : public scheduler_unit {
                 register_set *dp_out, register_set *sfu_out,
                 register_set *int_out, register_set *tensor_core_out,
                 std::vector<register_set *> &spec_cores_out,
-                register_set *mem_out, int id)
+                register_set *mem_out, int id, unsigned warp_size)
       : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                        sfu_out, int_out, tensor_core_out, spec_cores_out,
-                       mem_out, id) {}
+                       mem_out, id, warp_size) {}
   virtual ~gto_scheduler() {}
   virtual void order_warps();
   virtual void done_adding_supervised_warps() {
@@ -555,10 +563,10 @@ class oldest_scheduler : public scheduler_unit {
                    register_set *dp_out, register_set *sfu_out,
                    register_set *int_out, register_set *tensor_core_out,
                    std::vector<register_set *> &spec_cores_out,
-                   register_set *mem_out, int id)
+                   register_set *mem_out, int id, unsigned warp_size)
       : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                        sfu_out, int_out, tensor_core_out, spec_cores_out,
-                       mem_out, id) {}
+                       mem_out, id, warp_size) {}
   virtual ~oldest_scheduler() {}
   virtual void order_warps();
   virtual void done_adding_supervised_warps() {
@@ -575,10 +583,11 @@ class two_level_active_scheduler : public scheduler_unit {
                              register_set *sfu_out, register_set *int_out,
                              register_set *tensor_core_out,
                              std::vector<register_set *> &spec_cores_out,
-                             register_set *mem_out, int id, char *config_str)
+                             register_set *mem_out, int id,
+                             unsigned warp_size, char *config_str)
       : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                        sfu_out, int_out, tensor_core_out, spec_cores_out,
-                       mem_out, id),
+                       mem_out, id, warp_size),
         m_pending_warps() {
     unsigned inner_level_readin;
     unsigned outer_level_readin;
@@ -625,7 +634,8 @@ class swl_scheduler : public scheduler_unit {
                 register_set *dp_out, register_set *sfu_out,
                 register_set *int_out, register_set *tensor_core_out,
                 std::vector<register_set *> &spec_cores_out,
-                register_set *mem_out, int id, char *config_string);
+                register_set *mem_out, int id, unsigned warp_size,
+                char *config_string);
   virtual ~swl_scheduler() {}
   virtual void order_warps();
   virtual void done_adding_supervised_warps() {
@@ -2073,6 +2083,7 @@ class shader_core_ctx : public core_t {
   void issue_block2core(class kernel_info_t &kernel);
 
   void cache_flush();
+  void print_scheduler_cycle_distro(FILE *fout, unsigned core_id);
   void cache_invalidate();
   void accept_fetch_response(mem_fetch *mf);
   void accept_ldst_unit_response(class mem_fetch *mf);
@@ -2099,6 +2110,7 @@ class shader_core_ctx : public core_t {
   }
   kernel_info_t *get_kernel() { return m_kernel; }
   unsigned get_sid() const { return m_sid; }
+  unsigned get_cluster_id() const;
 
   // used by functional simulation:
   // modifiers
@@ -2645,6 +2657,8 @@ class simt_core_cluster {
   unsigned get_n_active_cta() const;
   unsigned get_n_active_sms() const;
   gpgpu_sim *get_gpu() { return m_gpu; }
+  unsigned get_cluster_id() const { return m_cluster_id; }
+  void print_scheduler_cycle_distro(FILE *fout);
 
   void display_pipeline(unsigned sid, FILE *fout, int print_mem, int mask);
   void print_cache_stats(FILE *fp, unsigned &dl1_accesses,
@@ -2829,5 +2843,8 @@ class sst_memory_interface : public mem_fetch_interface {
 };
 
 inline int scheduler_unit::get_sid() const { return m_shader->get_sid(); }
+inline unsigned shader_core_ctx::get_cluster_id() const {
+  return m_cluster->get_cluster_id();
+}
 
 #endif /* SHADER_H */

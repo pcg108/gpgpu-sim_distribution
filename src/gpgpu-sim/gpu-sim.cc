@@ -77,6 +77,7 @@ class gpgpu_sim_wrapper {};
 
 #include <stdio.h>
 #include <string.h>
+#include <cctype>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -86,6 +87,31 @@ class gpgpu_sim_wrapper {};
 bool g_interactive_debugger_enabled = false;
 
 tr1_hash_map<new_addr_type, unsigned> address_random_interleaving;
+
+namespace {
+
+bool env_flag_enabled(const char *name) {
+  const char *value = getenv(name);
+  if (value == NULL) return false;
+  return strcmp(value, "1") == 0 || strcmp(value, "true") == 0 ||
+         strcmp(value, "TRUE") == 0 || strcmp(value, "yes") == 0 ||
+         strcmp(value, "YES") == 0 || strcmp(value, "on") == 0 ||
+         strcmp(value, "ON") == 0;
+}
+
+std::string sanitize_log_name(const std::string &name) {
+  std::string sanitized = name;
+  for (size_t i = 0; i < sanitized.size(); ++i) {
+    char &c = sanitized[i];
+    if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_' && c != '-' &&
+        c != '.' && c != '(' && c != ')') {
+      c = '_';
+    }
+  }
+  return sanitized;
+}
+
+}  // namespace
 
 /* Clock Domains */
 
@@ -941,6 +967,35 @@ void gpgpu_sim::set_kernel_done(kernel_info_t *kernel) {
     }
   }
   assert(k != m_running_kernels.end());
+
+  if (env_flag_enabled("GPGPUSIM_LOG_SHADER_CYCLE_DISTRO")) {
+    const unsigned kernel_id = kernel->get_trace_kernel_id();
+    const unsigned long long kernel_total_cycles =
+        kernel->end_cycle - kernel->start_cycle;
+    const std::string filename =
+        "stall_breakdown/kernel_" + std::to_string(kernel_id) + "_" +
+        sanitize_log_name(kernel->name()) + "_shader_cycle_distro.txt";
+
+    system("mkdir -p stall_breakdown");
+    FILE *fout = fopen(filename.c_str(), "w");
+    if (fout != NULL) {
+      fprintf(fout, "kernel_name = %s\n", kernel->name().c_str());
+      fprintf(fout, "kernel_id = %u\n", kernel_id);
+      fprintf(fout, "kernel_total_cycles = %llu\n", kernel_total_cycles);
+      fprintf(fout,
+              "note = per-kernel, per-warp-scheduler delta snapshot; set "
+              "GPGPUSIM_LOG_SHADER_CYCLE_DISTRO=1 to enable\n");
+      fprintf(fout, "\n");
+      print_shader_cycle_distro(fout);
+      fclose(fout);
+    }
+  }
+}
+
+void gpgpu_sim::print_shader_cycle_distro(FILE *fout) {
+  for (unsigned i = 0; i < m_shader_config->n_simt_clusters; ++i) {
+    m_cluster[i]->print_scheduler_cycle_distro(fout);
+  }
 }
 
 void gpgpu_sim::stop_all_running_kernels() {

@@ -681,7 +681,7 @@ class gpgpu_sim : public gpgpu_t {
   void shader_print_cache_stats(FILE *fout) const;
   void shader_print_scheduler_stat(FILE *fout, bool print_dynamic_info) const;
   void visualizer_printstat();
-  void print_shader_cycle_distro(FILE *fout) const;
+  void print_shader_cycle_distro(FILE *fout);
 
   void gpgpu_debug();
 

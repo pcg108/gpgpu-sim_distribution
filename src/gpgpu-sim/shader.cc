@@ -211,7 +211,7 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i));
+            &m_pipeline_reg[ID_OC_MEM], i, m_config->warp_size));
         break;
       case CONCRETE_SCHEDULER_TWO_LEVEL_ACTIVE:
         schedulers.push_back(new two_level_active_scheduler(
@@ -219,7 +219,8 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i, m_config->gpgpu_scheduler_string));
+            &m_pipeline_reg[ID_OC_MEM], i, m_config->warp_size,
+            m_config->gpgpu_scheduler_string));
         break;
       case CONCRETE_SCHEDULER_GTO:
         schedulers.push_back(new gto_scheduler(
@@ -227,7 +228,7 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i));
+            &m_pipeline_reg[ID_OC_MEM], i, m_config->warp_size));
         break;
       case CONCRETE_SCHEDULER_RRR:
         schedulers.push_back(new rrr_scheduler(
@@ -235,7 +236,7 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i));
+            &m_pipeline_reg[ID_OC_MEM], i, m_config->warp_size));
         break;
       case CONCRETE_SCHEDULER_OLDEST_FIRST:
         schedulers.push_back(new oldest_scheduler(
@@ -243,7 +244,7 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i));
+            &m_pipeline_reg[ID_OC_MEM], i, m_config->warp_size));
         break;
       case CONCRETE_SCHEDULER_WARP_LIMITING:
         schedulers.push_back(new swl_scheduler(
@@ -251,7 +252,8 @@ void shader_core_ctx::create_schedulers() {
             &m_pipeline_reg[ID_OC_SP], &m_pipeline_reg[ID_OC_DP],
             &m_pipeline_reg[ID_OC_SFU], &m_pipeline_reg[ID_OC_INT],
             &m_pipeline_reg[ID_OC_TENSOR_CORE], m_specilized_dispatch_reg,
-            &m_pipeline_reg[ID_OC_MEM], i, m_config->gpgpu_scheduler_string));
+            &m_pipeline_reg[ID_OC_MEM], i, m_config->warp_size,
+            m_config->gpgpu_scheduler_string));
         break;
       default:
         abort();
@@ -1047,8 +1049,10 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
   (*pipe_reg)->issue(
       active_mask, warp_id, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle,
       m_warp[warp_id]->get_dynamic_warp_id(), sch_id,
-      m_warp[warp_id]->get_streamID());  // dynamic instruction information
+      m_warp[warp_id]->get_streamID(), m_sid,
+      sch_id);  // dynamic instruction information
   m_stats->shader_cycle_distro[2 + (*pipe_reg)->active_count()]++;
+  schedulers[sch_id]->log_issue_cycle((*pipe_reg)->active_count());
   func_exec_inst(**pipe_reg);
 
   // Add LDGSTS instructions into a buffer
@@ -1557,12 +1561,57 @@ void scheduler_unit::cycle() {
 
   // issue stall statistics:
   if (!valid_inst)
-    m_stats->shader_cycle_distro[0]++;  // idle or control hazard
+    m_stats->shader_cycle_distro[0]++, log_no_issue_cycle(0);  // idle/control
   else if (!ready_inst)
-    m_stats->shader_cycle_distro[1]++;  // waiting for RAW hazards (possibly due
-                                        // to memory)
+    m_stats->shader_cycle_distro[1]++, log_no_issue_cycle(1);  // scoreboard
   else if (!issued_inst)
-    m_stats->shader_cycle_distro[2]++;  // pipeline stalled
+    m_stats->shader_cycle_distro[2]++, log_no_issue_cycle(2);  // stalled
+}
+
+void scheduler_unit::log_issue_cycle(unsigned active_count) {
+  m_shader_cycle_distro[2 + active_count]++;
+}
+
+void scheduler_unit::log_no_issue_cycle(unsigned bucket) {
+  assert(bucket < 3);
+  m_shader_cycle_distro[bucket]++;
+}
+
+void scheduler_unit::print_shader_cycle_distro(FILE *fout, unsigned cluster_id,
+                                               unsigned core_id) {
+  unsigned no_issue_cycles = 0;
+  for (unsigned i = 0; i < m_shader_cycle_distro.size(); ++i) {
+    const unsigned delta =
+        m_shader_cycle_distro[i] - m_last_logged_shader_cycle_distro[i];
+    if (i < 3) no_issue_cycles += delta;
+  }
+
+  fprintf(fout,
+          "===== Cluster %u | Core %u | Scheduler %d =====================\n",
+          cluster_id, core_id, m_id);
+  fprintf(fout, "no_issue_cycles = %u\n", no_issue_cycles);
+  fprintf(fout, "stall_cycles = %u\n",
+          m_shader_cycle_distro[2] - m_last_logged_shader_cycle_distro[2]);
+  fprintf(fout, "idle_or_control_hazard_cycles = %u\n",
+          m_shader_cycle_distro[0] - m_last_logged_shader_cycle_distro[0]);
+  fprintf(fout, "scoreboard_cycles = %u\n",
+          m_shader_cycle_distro[1] - m_last_logged_shader_cycle_distro[1]);
+  fprintf(fout, "warp_occupancy_buckets = ");
+  fprintf(fout, "Stall:%u\t",
+          m_shader_cycle_distro[2] - m_last_logged_shader_cycle_distro[2]);
+  fprintf(fout, "W0_Idle:%u\t",
+          m_shader_cycle_distro[0] - m_last_logged_shader_cycle_distro[0]);
+  fprintf(fout, "W0_Scoreboard:%u",
+          m_shader_cycle_distro[1] - m_last_logged_shader_cycle_distro[1]);
+  for (unsigned i = 3; i < m_shader_cycle_distro.size(); ++i) {
+    fprintf(fout, "\tW%d:%u", i - 2,
+            m_shader_cycle_distro[i] - m_last_logged_shader_cycle_distro[i]);
+  }
+  fprintf(fout, "\n");
+  fprintf(fout,
+          "===============================================================\n\n");
+
+  m_last_logged_shader_cycle_distro = m_shader_cycle_distro;
 }
 
 void scheduler_unit::do_on_warp_issued(
@@ -1682,10 +1731,11 @@ swl_scheduler::swl_scheduler(shader_core_stats *stats, shader_core_ctx *shader,
                              register_set *sfu_out, register_set *int_out,
                              register_set *tensor_core_out,
                              std::vector<register_set *> &spec_cores_out,
-                             register_set *mem_out, int id, char *config_string)
+                             register_set *mem_out, int id, unsigned warp_size,
+                             char *config_string)
     : scheduler_unit(stats, shader, scoreboard, simt, warp, sp_out, dp_out,
                      sfu_out, int_out, tensor_core_out, spec_cores_out, mem_out,
-                     id) {
+                     id, warp_size) {
   unsigned m_prioritization_readin;
   int ret = sscanf(config_string, "warp_limiting:%d:%d",
                    &m_prioritization_readin, &m_num_warps_to_limit);
@@ -4464,6 +4514,18 @@ void exec_simt_core_cluster::create_shader_core_ctx() {
     m_core[i] = new exec_shader_core_ctx(m_gpu, this, sid, m_cluster_id,
                                          m_config, m_mem_config, m_stats);
     m_core_sim_order.push_back(i);
+  }
+}
+
+void simt_core_cluster::print_scheduler_cycle_distro(FILE *fout) {
+  for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; ++i) {
+    m_core[i]->print_scheduler_cycle_distro(fout, i);
+  }
+}
+
+void shader_core_ctx::print_scheduler_cycle_distro(FILE *fout, unsigned core_id) {
+  for (unsigned i = 0; i < schedulers.size(); ++i) {
+    schedulers[i]->print_shader_cycle_distro(fout, get_cluster_id(), core_id);
   }
 }
 

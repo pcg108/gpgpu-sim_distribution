@@ -47,6 +47,13 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
   if (inst) {
     m_inst = *inst;
     assert(wid == m_inst.warp_id());
+    m_dynamic_wid = m_inst.dynamic_warp_id();
+  } else if (m_original_mf) {
+    m_dynamic_wid = m_original_mf->get_dynamic_wid();
+  } else if (m_original_wr_mf) {
+    m_dynamic_wid = m_original_wr_mf->get_dynamic_wid();
+  } else {
+    m_dynamic_wid = (unsigned)-1;
   }
   m_streamID = streamID;
   m_data_size = access.get_size();
@@ -66,6 +73,9 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
   m_type = m_access.is_write() ? WRITE_REQUEST : READ_REQUEST;
   m_timestamp = cycle;
   m_timestamp2 = 0;
+  m_icnt_receive_time = 0;
+  m_l2_memport_push_cycle = 0;
+  m_l2_fill_complete_cycle = 0;
   m_status = MEM_FETCH_INITIALIZED;
   m_status_change = cycle;
   m_mem_config = config;
