@@ -35,6 +35,7 @@
 
 #include <list>
 #include <set>
+#include <string>
 
 #include "../abstract_hardware_model.h"
 #include "../option_parser.h"
@@ -48,6 +49,72 @@
 #include "mem_fetch.h"
 #include "mem_latency_stat.h"
 #include "shader.h"
+#include "trace_file_manager.h"
+
+static mem_fetch *l2_trace_info_mf(mem_fetch *mf) {
+  if (mf == NULL) return NULL;
+  if (!mf->get_inst().empty()) return mf;
+  if (mf->get_original_mf() != NULL) return mf->get_original_mf();
+  if (mf->get_original_wr_mf() != NULL) return mf->get_original_wr_mf();
+  return mf;
+}
+
+static void log_l2_to_icnt_timing(mem_fetch *mf, gpgpu_sim *gpu) {
+  static const char *trace_dir = getenv("L1_TRACE_DIR");
+  if (trace_dir == NULL || mf == NULL) return;
+
+  const unsigned long long start_cycle = mf->get_l2_memport_push_cycle();
+  const unsigned long long end_cycle = mf->get_l2_fill_complete_cycle();
+  if (start_cycle == 0 || end_cycle < start_cycle) return;
+
+  mem_fetch *info_mf = l2_trace_info_mf(mf);
+  if (info_mf == NULL) return;
+
+  unsigned shader_id = info_mf->get_sid();
+  unsigned scheduler_id = 0;
+  unsigned kernel_uid = (unsigned)-1;
+  std::string kernel_name = "unknown_kernel";
+  if (!info_mf->get_inst().empty()) {
+    scheduler_id = info_mf->get_inst().get_scheduler_id();
+    kernel_uid = info_mf->get_inst().get_kernel_uid();
+    if (!info_mf->get_inst().get_kernel_name().empty()) {
+      kernel_name = info_mf->get_inst().get_kernel_name();
+    }
+  }
+
+  if (kernel_uid == (unsigned)-1 && gpu != NULL &&
+      gpu->last_uid != (unsigned long long)-1) {
+    kernel_uid = (unsigned)gpu->last_uid;
+  }
+
+  ensure_directory_exists(trace_dir);
+
+  char kernel_folder[1024];
+  snprintf(kernel_folder, sizeof(kernel_folder), "%s/kernel_%u_%s", trace_dir,
+           kernel_uid, kernel_name.c_str());
+  ensure_directory_exists(kernel_folder);
+
+  char shader_folder[1536];
+  snprintf(shader_folder, sizeof(shader_folder), "%s/shader_%u",
+           kernel_folder, shader_id);
+  ensure_directory_exists(shader_folder);
+
+  char scheduler_folder[2048];
+  snprintf(scheduler_folder, sizeof(scheduler_folder), "%s/scheduler_%u",
+           shader_folder, scheduler_id);
+  ensure_directory_exists(scheduler_folder);
+
+  char filename[2560];
+  snprintf(filename, sizeof(filename), "%s/l2_to_icnt_timing.txt",
+           scheduler_folder);
+
+  char line[256];
+  snprintf(line, sizeof(line),
+           "request_uid=%u start_cycle=%llu end_cycle=%llu elapsed_cycle=%llu\n",
+           mf->get_request_uid(), start_cycle, end_cycle,
+           end_cycle - start_cycle);
+  TraceFileManager::instance().write_line(filename, line);
+}
 
 mem_fetch *partition_mf_allocator::alloc(new_addr_type addr,
                                          mem_access_type type, unsigned size,
@@ -473,6 +540,7 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
         mf->set_l2_fill_complete_cycle(cycle);
         mf->set_reply();
         mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE, cycle);
+        log_l2_to_icnt_timing(mf, m_gpu);
         m_L2_icnt_queue->push(mf);
       } else {
         if (m_config->m_L2_config.m_write_alloc_policy == FETCH_ON_WRITE) {
@@ -481,6 +549,7 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
           original_wr_mf->set_l2_fill_complete_cycle(cycle);
           original_wr_mf->set_reply();
           original_wr_mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE, cycle);
+          log_l2_to_icnt_timing(original_wr_mf, m_gpu);
           m_L2_icnt_queue->push(original_wr_mf);
         }
         m_request_tracker.erase(mf);
@@ -505,6 +574,7 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
       if (mf->is_write() && mf->get_type() == WRITE_ACK)
         mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,
                        m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+      log_l2_to_icnt_timing(mf, m_gpu);
       m_L2_icnt_queue->push(mf);
       m_dram_L2_queue->pop();
     }
@@ -546,6 +616,7 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
               mf->set_reply();
               mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,
                              m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+              log_l2_to_icnt_timing(mf, m_gpu);
               m_L2_icnt_queue->push(mf);
             }
             m_icnt_L2_queue->pop();
@@ -567,6 +638,7 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
               mf->set_reply();
               mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,
                              m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
+              log_l2_to_icnt_timing(mf, m_gpu);
               m_L2_icnt_queue->push(mf);
             }
           }
