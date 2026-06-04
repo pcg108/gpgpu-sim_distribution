@@ -110,23 +110,20 @@
         /* Create base trace directory if it doesn't exist */ \
         mkdir(trace_dir, 0755);                                          \
         \
-        /* Create kernel subdirectory */ \
-        char kernel_dir[256];                                            \
-        snprintf(kernel_dir, sizeof(kernel_dir),                         \
-                 "%s/kernel_%u/", trace_dir, current_kernel_uid);        \
-        mkdir(kernel_dir, 0755);                                         \
-        \
-        /* Create cluster subdirectory */ \
-        char cluster_dir[256];                                           \
-        snprintf(cluster_dir, sizeof(cluster_dir),                       \
-                 "%scluster_%d/", kernel_dir, current_cluster_id);       \
-        mkdir(cluster_dir, 0755);                                        \
+        /* Create kernel and cluster subdirectories */ \
+        std::string kernel_dir = std::string(trace_dir) + "/kernel_" +   \
+                                 std::to_string(current_kernel_uid) + "/"; \
+        mkdir(kernel_dir.c_str(), 0755);                                 \
+        std::string cluster_dir = kernel_dir + "cluster_" +              \
+                                  std::to_string(current_cluster_id) + "/"; \
+        mkdir(cluster_dir.c_str(), 0755);                                \
         \
         /* Create filename with core and scheduler ID */ \
-        char filename[256];                                              \
-        snprintf(filename, sizeof(filename),                             \
-                 "%score_%d_scheduler_%d.txt", cluster_dir, current_core_id, current_scheduler_id); \
-        sched_trace_file = fopen(filename, "a");                         \
+        std::string filename = cluster_dir + "core_" +                   \
+                               std::to_string(current_core_id) +         \
+                               "_scheduler_" +                           \
+                               std::to_string(current_scheduler_id) + ".txt"; \
+        sched_trace_file = fopen(filename.c_str(), "a");                 \
       }                                                                   \
       \
       if (sched_trace_file != NULL) {                                    \

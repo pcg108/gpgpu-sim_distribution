@@ -1223,7 +1223,11 @@ void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
   // Check if this is an L1 writeback - if so, use original_mf for instruction info
   bool is_l1_writeback = (mf->get_access_type() == L1_WRBK_ACC);
   mem_fetch *info_mf = mf;
-  if (is_l1_writeback && mf->get_original_mf() != nullptr) {
+  if (mf->get_inst().empty() && mf->get_original_mf() != nullptr) {
+    info_mf = mf->get_original_mf();
+  } else if (mf->get_inst().empty() && mf->get_original_wr_mf() != nullptr) {
+    info_mf = mf->get_original_wr_mf();
+  } else if (is_l1_writeback && mf->get_original_mf() != nullptr) {
     info_mf = mf->get_original_mf();
   }
 
@@ -1238,7 +1242,7 @@ void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
   unsigned sub_partition_id = info_mf->get_sub_partition_id();
   unsigned set_index = m_config.set_index(addr);
   new_addr_type tag = m_config.tag(addr);
-  std::bitset sector_mask = mf->get_access_sector_mask();
+  auto sector_mask = mf->get_access_sector_mask();
   
   // Get scheduler ID from instruction if available
   unsigned scheduler_id = 0;
@@ -1250,6 +1254,11 @@ void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
     if (!info_mf->get_inst().get_kernel_name().empty()) {
       kernel_name = info_mf->get_inst().get_kernel_name();
     }
+  }
+
+  if (kernel_uid == (unsigned)-1 && m_gpu != nullptr &&
+      m_gpu->last_uid != (unsigned long long)-1) {
+    kernel_uid = (unsigned)m_gpu->last_uid;
   }
 
   // Create folder structure:

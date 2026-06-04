@@ -31,6 +31,7 @@
 // POSSIBILITY OF SUCH DAMAGE.
 
 #include "shader.h"
+#include <cstdlib>
 #include <float.h>
 #include <limits.h>
 #include <string.h>
@@ -49,11 +50,149 @@
 #include "shader_trace.h"
 #include "stat-tool.h"
 #include "traffic_breakdown.h"
+#include "trace_file_manager.h"
 #include "visualizer.h"
 
 #define PRIORITIZE_MSHR_OVER_WB 1
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
+
+static bool log_cache_traces_enabled() {
+  static const bool enabled = std::getenv("LOG_CACHE_TRACES") != NULL;
+  return enabled;
+}
+
+static unsigned trace_kernel_uid(kernel_info_t *kernel,
+                                 const warp_inst_t *inst) {
+  if (kernel != NULL) return kernel->get_trace_kernel_id();
+  if (inst != NULL && inst->get_kernel_uid() != (unsigned)-1)
+    return inst->get_kernel_uid();
+  return (unsigned)-1;
+}
+
+static std::string trace_kernel_name(kernel_info_t *kernel,
+                                     const warp_inst_t *inst) {
+  if (kernel != NULL) return kernel->get_name();
+  if (inst != NULL && !inst->get_kernel_name().empty())
+    return inst->get_kernel_name();
+  return "unknown_kernel";
+}
+
+static std::string trace_kernel_dir(const char *root, kernel_info_t *kernel,
+                                    const warp_inst_t *inst) {
+  ensure_directory_exists(root);
+
+  char dirname[4096];
+  snprintf(dirname, sizeof(dirname), "%s/kernel_%u_%s", root,
+           trace_kernel_uid(kernel, inst),
+           trace_kernel_name(kernel, inst).c_str());
+  ensure_directory_exists(dirname);
+  return dirname;
+}
+
+static std::string trace_shader_dir(const char *root, kernel_info_t *kernel,
+                                    const warp_inst_t *inst,
+                                    unsigned shader_id) {
+  std::string kernel_dir = trace_kernel_dir(root, kernel, inst);
+  char dirname[4096];
+  snprintf(dirname, sizeof(dirname), "%s/shader_%u", kernel_dir.c_str(),
+           shader_id);
+  ensure_directory_exists(dirname);
+  return dirname;
+}
+
+static std::string trace_scheduler_dir(const char *root, kernel_info_t *kernel,
+                                       const warp_inst_t *inst,
+                                       unsigned shader_id,
+                                       unsigned scheduler_id) {
+  std::string shader_dir = trace_shader_dir(root, kernel, inst, shader_id);
+  char dirname[4096];
+  snprintf(dirname, sizeof(dirname), "%s/scheduler_%u", shader_dir.c_str(),
+           scheduler_id);
+  ensure_directory_exists(dirname);
+  return dirname;
+}
+
+static unsigned find_scheduler_for_warp(
+    const std::vector<scheduler_unit *> &schedulers, unsigned warp_id,
+    unsigned fallback_scheduler) {
+  for (unsigned i = 0; i < schedulers.size(); ++i) {
+    if (schedulers[i] != NULL && schedulers[i]->supervises_warp(warp_id))
+      return schedulers[i]->get_schd_id();
+  }
+  return fallback_scheduler;
+}
+
+static void log_icache_access(kernel_info_t *kernel, unsigned shader_id,
+                              unsigned scheduler_id, unsigned warp_id,
+                              address_type pc,
+                              enum cache_request_status status) {
+  if (!log_cache_traces_enabled()) return;
+
+  std::string dirname =
+      trace_scheduler_dir("icache_status", kernel, NULL, shader_id,
+                          scheduler_id);
+  char filename[4096];
+  snprintf(filename, sizeof(filename), "%s/icache_access.txt",
+           dirname.c_str());
+
+  char line[512];
+  snprintf(line, sizeof(line), "PC=0x%08llx warp=%u status=%s\n",
+           (unsigned long long)pc, warp_id, cache_request_status_str(status));
+  TraceFileManager::instance().write_line(filename, line);
+}
+
+static void log_dcache_access(kernel_info_t *kernel, unsigned shader_id,
+                              unsigned scheduler_id, mem_fetch *mf,
+                              enum cache_request_status status) {
+  if (!log_cache_traces_enabled() || mf == NULL) return;
+
+  const warp_inst_t &inst = mf->get_inst();
+  std::string dirname =
+      trace_scheduler_dir("dcache_status", kernel, &inst, shader_id,
+                          scheduler_id);
+  char filename[4096];
+  snprintf(filename, sizeof(filename), "%s/dcache_access.txt",
+           dirname.c_str());
+
+  char line[512];
+  snprintf(line, sizeof(line),
+           "request_uid=%u PC=0x%08llx warp=%u addr=0x%llx size=%u status=%s\n",
+           mf->get_request_uid(), (unsigned long long)inst.pc, inst.warp_id(),
+           (unsigned long long)mf->get_addr(), mf->get_access_size(),
+           cache_request_status_str(status));
+  TraceFileManager::instance().write_line(filename, line);
+}
+
+static void log_warp_assignment(kernel_info_t *kernel, unsigned shader_id,
+                                unsigned cta_id, unsigned ctaid,
+                                unsigned warp_id, unsigned warp_in_cta,
+                                unsigned dynamic_warp_id,
+                                unsigned scheduler_id, bool write_header,
+                                bool write_trailer) {
+  if (!log_cache_traces_enabled()) return;
+
+  std::string dirname = trace_kernel_dir("warp_assignments", kernel, NULL);
+  char filename[4096];
+  snprintf(filename, sizeof(filename), "%s/shader_%u.txt", dirname.c_str(),
+           shader_id);
+
+  if (write_header) {
+    char header[512];
+    snprintf(header, sizeof(header),
+             "CTA %u (ctaid=%u) assigned to shader core %u:\n", cta_id, ctaid,
+             shader_id);
+    TraceFileManager::instance().write_line(filename, header);
+  }
+
+  char line[512];
+  snprintf(line, sizeof(line),
+           "  Warp %u (warp_in_cta=%u dynamic_warp_id=%u) -> Scheduler %u\n",
+           warp_id, warp_in_cta, dynamic_warp_id, scheduler_id);
+  TraceFileManager::instance().write_line(filename, line);
+
+  if (write_trailer) TraceFileManager::instance().write_line(filename, "\n");
+}
 
 mem_fetch *shader_core_mem_fetch_allocator::alloc(
     new_addr_type addr, mem_access_type type, unsigned size, bool wr,
@@ -574,6 +713,14 @@ void shader_core_ctx::init_warps(unsigned cta_id, unsigned start_thread,
 
       m_warp[i]->init(start_pc, cta_id, i, active_threads, m_dynamic_warp_id,
                       kernel.get_streamID());
+      unsigned scheduler_id = find_scheduler_for_warp(
+          schedulers, i,
+          m_config->gpgpu_num_sched_per_core
+              ? i % m_config->gpgpu_num_sched_per_core
+              : 0);
+      log_warp_assignment(&kernel, m_sid, cta_id, ctaid, i, i - start_warp,
+                          m_dynamic_warp_id, scheduler_id, i == start_warp,
+                          i + 1 == end_warp);
       ++m_dynamic_warp_id;
       m_not_completed += n_active;
       ++m_active_warps;
@@ -1003,6 +1150,14 @@ void shader_core_ctx::fetch() {
             status = m_L1I->access(
                 (new_addr_type)ppc, mf,
                 m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle, events);
+
+          unsigned scheduler_id = find_scheduler_for_warp(
+              schedulers, warp_id,
+              m_config->gpgpu_num_sched_per_core
+                  ? warp_id % m_config->gpgpu_num_sched_per_core
+                  : 0);
+          log_icache_access(m_warp[warp_id]->get_kernel_info(), m_sid,
+                            scheduler_id, warp_id, pc, status);
 
           if (status == MISS) {
             m_last_warp_fetched = warp_id;
@@ -2145,6 +2300,8 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
       } else {
         result = BK_CONF;
         m_stats->gpgpu_n_l1cache_bkconflict++;
+        log_dcache_access(m_core->get_kernel(), m_sid, inst.get_scheduler_id(),
+                          mf, RESERVATION_FAIL);
         delete mf;
         break;  // do not try again, just break from the loop and try the next
                 // cycle
@@ -2163,6 +2320,8 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
         mf->get_addr(), mf,
         m_core->get_gpu()->gpu_sim_cycle + m_core->get_gpu()->gpu_tot_sim_cycle,
         events);
+    log_dcache_access(m_core->get_kernel(), m_sid, inst.get_scheduler_id(), mf,
+                      status);
     return process_cache_access(cache, mf->get_addr(), inst, events, mf,
                                 status);
   }
@@ -2178,6 +2337,9 @@ void ldst_unit::L1_latency_queue_cycle() {
                         m_core->get_gpu()->gpu_sim_cycle +
                             m_core->get_gpu()->gpu_tot_sim_cycle,
                         events);
+      log_dcache_access(m_core->get_kernel(), m_sid,
+                        mf_next->get_inst().get_scheduler_id(), mf_next,
+                        status);
 
       bool write_sent = was_write_sent(events);
       bool read_sent = was_read_sent(events);

@@ -50,7 +50,10 @@ class TraceFileManager {
   bool is_critical_trace_file(const std::string &filename) const {
     return filename.find("l2_to_icnt_timing.txt") != std::string::npos ||
            filename.find("l1_to_l2_requests.txt") != std::string::npos ||
-           filename.find("ldst_unit_entries.txt") != std::string::npos;
+           filename.find("ldst_unit_entries.txt") != std::string::npos ||
+           filename.find("icache_access.txt") != std::string::npos ||
+           filename.find("dcache_access.txt") != std::string::npos ||
+           filename.find("warp_assignments/") != std::string::npos;
   }
 
   FILE *get_file(const std::string &filename) {

@@ -417,6 +417,14 @@ class scheduler_unit {  // this can be copied freely, so can be used in std
   void log_no_issue_cycle(unsigned bucket);
   void print_shader_cycle_distro(FILE *fout, unsigned cluster_id,
                                  unsigned core_id);
+  bool supervises_warp(unsigned warp_id) const {
+    for (std::vector<shd_warp_t *>::const_iterator iter =
+             m_supervised_warps.begin();
+         iter != m_supervised_warps.end(); ++iter) {
+      if (*iter != NULL && (*iter)->get_warp_id() == warp_id) return true;
+    }
+    return false;
+  }
 
   // These are some common ordering fucntions that the
   // higher order schedulers can take advantage of
