@@ -44,6 +44,7 @@
 #include "mem_fetch.h"
 #include "shader.h"
 #include "shader_trace.h"
+#include "trace_file_manager.h"
 
 #include <sys/types.h>
 #include <time.h>
@@ -1004,6 +1005,14 @@ unsigned gpgpu_sim::finished_kernel() {
 
 void gpgpu_sim::set_kernel_done(kernel_info_t *kernel) {
   unsigned uid = kernel->get_uid();
+  const unsigned trace_kernel_id = kernel->get_trace_kernel_id();
+  const std::string kernel_name = kernel->name();
+
+  TraceFileManager::instance().close_kernel_files(trace_kernel_id, kernel_name);
+  if (uid != trace_kernel_id) {
+    TraceFileManager::instance().close_kernel_files(uid, kernel_name);
+  }
+
   last_uid = uid;
   unsigned long long streamID = kernel->get_streamID();
   last_streamID = streamID;
