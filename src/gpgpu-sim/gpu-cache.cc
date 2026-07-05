@@ -1266,8 +1266,9 @@ void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
   ensure_directory_exists(trace_dir);
 
   char kernel_folder[1024];
-  snprintf(kernel_folder, sizeof(kernel_folder), "%s/kernel_%u_%s", trace_dir,
-           kernel_uid, kernel_name.c_str());
+  std::string kernel_dir = trace_kernel_dir_name(kernel_uid, kernel_name);
+  snprintf(kernel_folder, sizeof(kernel_folder), "%s/%s", trace_dir,
+           kernel_dir.c_str());
   ensure_directory_exists(kernel_folder);
 
   char shader_folder[1536];

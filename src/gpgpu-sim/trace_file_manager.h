@@ -33,10 +33,45 @@
 #ifndef TRACE_FILE_MANAGER_H
 #define TRACE_FILE_MANAGER_H
 
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <string>
 #include <sys/stat.h>
+
+inline unsigned long long trace_name_hash(const std::string &name) {
+  unsigned long long hash = 1469598103934665603ull;
+  for (unsigned char c : name) {
+    hash ^= c;
+    hash *= 1099511628211ull;
+  }
+  return hash;
+}
+
+inline std::string bounded_trace_component(const std::string &name,
+                                           size_t max_name_len = 160) {
+  std::string sanitized;
+  sanitized.reserve(name.size());
+  for (unsigned char c : name) {
+    sanitized.push_back((c == '/' || c == '\0') ? '_' : c);
+  }
+
+  if (sanitized.size() <= max_name_len) return sanitized;
+
+  char suffix[32];
+  snprintf(suffix, sizeof(suffix), "_%016llx",
+           (unsigned long long)trace_name_hash(name));
+  const size_t suffix_len = strlen(suffix);
+  if (max_name_len <= suffix_len) return std::string(suffix, suffix_len);
+  return sanitized.substr(0, max_name_len - suffix_len) + suffix;
+}
+
+inline std::string trace_kernel_dir_name(unsigned kernel_uid,
+                                         const std::string &kernel_name) {
+  return "kernel_" + std::to_string(kernel_uid) + "_" +
+         bounded_trace_component(kernel_name);
+}
 
 // Singleton class to manage persistent file handles for trace logging.
 // This avoids the overhead of opening/closing files on every log call.
@@ -69,8 +104,29 @@ class TraceFileManager {
       }
       m_files[filename] = f;
       m_write_count[filename] = 0;
+    } else {
+      fprintf(stderr, "TraceFileManager: failed to open %s: %s\n",
+              filename.c_str(), strerror(errno));
     }
     return f;
+  }
+
+  void close_kernel_files(unsigned kernel_uid, const std::string &kernel_name) {
+    const std::string kernel_dir =
+        trace_kernel_dir_name(kernel_uid, kernel_name);
+
+    for (auto it = m_files.begin(); it != m_files.end();) {
+      if (is_kernel_file(it->first, kernel_dir)) {
+        if (it->second) {
+          fflush(it->second);
+          fclose(it->second);
+        }
+        m_write_count.erase(it->first);
+        it = m_files.erase(it);
+      } else {
+        ++it;
+      }
+    }
   }
 
   void write_line(const std::string &filename, const char *line) {
@@ -111,12 +167,23 @@ class TraceFileManager {
   }
 
  private:
-  TraceFileManager() {}
-  TraceFileManager(const TraceFileManager &) = delete;
-  TraceFileManager &operator=(const TraceFileManager &) = delete;
+	  TraceFileManager() {}
+	  TraceFileManager(const TraceFileManager &) = delete;
+	  TraceFileManager &operator=(const TraceFileManager &) = delete;
 
-  std::map<std::string, FILE *> m_files;
-  std::map<std::string, unsigned long long> m_write_count;
+  bool is_kernel_file(const std::string &filename,
+                      const std::string &kernel_dir) const {
+    size_t pos = filename.find(kernel_dir);
+    if (pos == std::string::npos) return false;
+    const bool component_start = (pos == 0 || filename[pos - 1] == '/');
+    const size_t after = pos + kernel_dir.size();
+    const bool component_end =
+        (after == filename.size() || filename[after] == '/');
+    return component_start && component_end;
+  }
+
+	  std::map<std::string, FILE *> m_files;
+	  std::map<std::string, unsigned long long> m_write_count;
 };
 
 // Helper to ensure directory exists (creates if missing)

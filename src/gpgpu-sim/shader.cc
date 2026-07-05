@@ -83,9 +83,10 @@ static std::string trace_kernel_dir(const char *root, kernel_info_t *kernel,
   ensure_directory_exists(root);
 
   char dirname[4096];
-  snprintf(dirname, sizeof(dirname), "%s/kernel_%u_%s", root,
-           trace_kernel_uid(kernel, inst),
-           trace_kernel_name(kernel, inst).c_str());
+  std::string kernel_dir =
+      trace_kernel_dir_name(trace_kernel_uid(kernel, inst),
+                            trace_kernel_name(kernel, inst));
+  snprintf(dirname, sizeof(dirname), "%s/%s", root, kernel_dir.c_str());
   ensure_directory_exists(dirname);
   return dirname;
 }
