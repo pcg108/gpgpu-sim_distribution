@@ -119,6 +119,7 @@ enum AdaptiveCache { FIXED = 0, ADAPTIVE_CACHE = 1 };
 
 #ifdef __cplusplus
 
+#include <climits>
 #include <stdio.h>
 #include <string.h>
 #include <zlib.h>
@@ -1477,6 +1478,7 @@ class warp_inst_t : public inst_t {
     m_sm_id = (unsigned)-1;
     m_sched_id = (unsigned)-1;
     m_kernel_uid = (unsigned)-1;
+    m_inst_ordinal = UINT_MAX;
     m_empty = true;
     m_config = NULL;
 
@@ -1502,6 +1504,7 @@ class warp_inst_t : public inst_t {
     m_sm_id = (unsigned)-1;
     m_sched_id = (unsigned)-1;
     m_kernel_uid = (unsigned)-1;
+    m_inst_ordinal = UINT_MAX;
     assert(config->warp_size <= MAX_WARP_SIZE);
     m_config = config;
     m_empty = true;
@@ -1733,10 +1736,12 @@ class warp_inst_t : public inst_t {
   unsigned get_sm_id() const { return m_sm_id; }
   unsigned get_scheduler_id() const { return m_sched_id; }
   unsigned get_kernel_uid() const { return m_kernel_uid; }
+  unsigned get_inst_ordinal() const { return m_inst_ordinal; }
 
   const std::string &get_kernel_name() const { return m_kernel_name; }
   void set_kernel_uid(unsigned uid) { m_kernel_uid = uid; }
   void set_kernel_name(const std::string &name) { m_kernel_name = name; }
+  void set_inst_ordinal(unsigned ordinal) { m_inst_ordinal = ordinal; }
 
  protected:
   unsigned m_uid;
@@ -1773,6 +1778,7 @@ class warp_inst_t : public inst_t {
   unsigned m_sm_id;
   unsigned m_sched_id;
   unsigned m_kernel_uid;
+  unsigned m_inst_ordinal;
 
   std::string m_kernel_name;  // kernel name for tracing
 
