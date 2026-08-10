@@ -1235,6 +1235,10 @@ void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
   unsigned sm_id = info_mf->get_sid();
   unsigned dynamic_warp_id = info_mf->get_dynamic_wid();
   address_type pc = info_mf->get_pc();
+  unsigned inst_ordinal = UINT_MAX;
+  if (!info_mf->get_inst().empty()) {
+    inst_ordinal = info_mf->get_inst().get_inst_ordinal();
+  }
   new_addr_type addr = mf->get_addr();  // Use actual writeback address
   unsigned access_size = mf->get_access_size();  // Use actual writeback size
   bool is_write = mf->get_is_write();
@@ -1297,11 +1301,12 @@ void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
   char line[512];
   snprintf(
       line, sizeof(line),
-      "request_uid=%u PC=0x%08x dynamic_warp=%u addr=0x%llx  subpartition=%u "
-      "set_index=%u tag=0x%llx sector_mask=0x%llx size=%u type=%s "
-      "l1_to_l2_cycle=%llu\n",
-      mf->get_request_uid(), pc, dynamic_warp_id, (unsigned long long)addr,
-      sub_partition_id, set_index, (unsigned long long)tag,
+      "request_uid=%u PC=0x%08x dynamic_warp=%u inst_ordinal=%u addr=0x%llx  "
+      "subpartition=%u set_index=%u tag=0x%llx sector_mask=0x%llx size=%u "
+      "type=%s l1_to_l2_cycle=%llu\n",
+      mf->get_request_uid(), pc, dynamic_warp_id, inst_ordinal,
+      (unsigned long long)addr, sub_partition_id, set_index,
+      (unsigned long long)tag,
       (unsigned long long)sector_mask.to_ullong(), access_size, access_type,
       mf->get_l2_memport_push_cycle());
 
@@ -1664,7 +1669,7 @@ enum cache_request_status data_cache::wr_miss_wa_naive(
   mem_fetch *n_mf = new mem_fetch(
       *ma, NULL, mf->get_streamID(), mf->get_ctrl_size(), mf->get_wid(),
       mf->get_sid(), mf->get_tpc(), mf->get_mem_config(),
-      m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle);
+      m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, NULL, mf);
 
   bool do_miss = false;
   bool wb = false;
