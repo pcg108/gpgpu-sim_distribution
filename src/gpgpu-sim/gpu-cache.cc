@@ -1317,10 +1317,12 @@ void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
   char line[512];
   snprintf(
       line, sizeof(line),
-      "request_uid=%u PC=0x%08x dynamic_warp=%u inst_ordinal=%u addr=0x%llx  "
+      "request_uid=%u PC=0x%08llx dynamic_warp=%u inst_ordinal=%u "
+      "addr=0x%llx  "
       "subpartition=%u set_index=%u tag=0x%llx sector_mask=0x%llx size=%u "
       "type=%s l1_to_l2_cycle=%llu\n",
-      mf->get_request_uid(), pc, dynamic_warp_id, inst_ordinal,
+      mf->get_request_uid(), (unsigned long long)pc, dynamic_warp_id,
+      inst_ordinal,
       (unsigned long long)addr, sub_partition_id, set_index,
       (unsigned long long)tag,
       (unsigned long long)sector_mask.to_ullong(), access_size, access_type,
