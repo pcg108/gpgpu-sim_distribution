@@ -1475,8 +1475,6 @@ class warp_inst_t : public inst_t {
   warp_inst_t() {
     m_uid = 0;
     m_streamID = (unsigned long long)-1;
-    m_sm_id = (unsigned)-1;
-    m_sched_id = (unsigned)-1;
     m_kernel_uid = (unsigned)-1;
     m_inst_ordinal = UINT_MAX;
     m_empty = true;
@@ -1501,8 +1499,6 @@ class warp_inst_t : public inst_t {
   warp_inst_t(const core_config *config) {
     m_uid = 0;
     m_streamID = (unsigned long long)-1;
-    m_sm_id = (unsigned)-1;
-    m_sched_id = (unsigned)-1;
     m_kernel_uid = (unsigned)-1;
     m_inst_ordinal = UINT_MAX;
     assert(config->warp_size <= MAX_WARP_SIZE);
@@ -1546,7 +1542,7 @@ class warp_inst_t : public inst_t {
 
   void issue(const active_mask_t &mask, unsigned warp_id,
              unsigned long long cycle, int dynamic_warp_id, int sch_id,
-             unsigned long long streamID, int sm_id, int scheduler_id);
+             unsigned long long streamID);
 
   const active_mask_t &get_active_mask() const { return m_warp_active_mask; }
   void completed(unsigned long long cycle)
@@ -1733,8 +1729,6 @@ class warp_inst_t : public inst_t {
   }
 
   // Logging metadata for the dynamic instruction.
-  unsigned get_sm_id() const { return m_sm_id; }
-  unsigned get_scheduler_id() const { return m_sched_id; }
   unsigned get_kernel_uid() const { return m_kernel_uid; }
   unsigned get_inst_ordinal() const { return m_inst_ordinal; }
 
@@ -1775,8 +1769,6 @@ class warp_inst_t : public inst_t {
 
   unsigned m_scheduler_id;  // the scheduler that issues this inst
 
-  unsigned m_sm_id;
-  unsigned m_sched_id;
   unsigned m_kernel_uid;
   unsigned m_inst_ordinal;
 

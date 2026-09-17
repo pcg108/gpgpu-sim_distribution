@@ -53,35 +53,45 @@
 #include "shader.h"
 #include "trace_file_manager.h"
 
-static mem_fetch *l2_trace_info_mf(mem_fetch *mf) {
-  if (mf == NULL) return NULL;
-  if (!mf->get_inst().empty()) return mf;
-  if (mf->get_original_mf() != NULL) return mf->get_original_mf();
-  if (mf->get_original_wr_mf() != NULL) return mf->get_original_wr_mf();
-  return mf;
+static mem_fetch *l2_trace_request_mf(mem_fetch *transport_mf) {
+  std::set<mem_fetch *> visited;
+  mem_fetch *request_mf = transport_mf;
+  for (unsigned depth = 0; request_mf != NULL && depth < 64; ++depth) {
+    if (!visited.insert(request_mf).second) return NULL;
+    if (request_mf->has_l2_memport_push_cycle()) return request_mf;
+    request_mf = request_mf->get_original_mf();
+  }
+  return NULL;
 }
 
-static void log_l2_to_icnt_timing(mem_fetch *mf, gpgpu_sim *gpu) {
+void log_l2_to_icnt_timing(mem_fetch *transport_mf, mem_fetch *service_mf,
+                           gpgpu_sim *gpu) {
   static const char *trace_dir = getenv("L1_TRACE_DIR");
-  if (trace_dir == NULL || mf == NULL) return;
+  if (trace_dir == NULL || transport_mf == NULL) return;
+  if (service_mf == NULL) service_mf = transport_mf;
 
-  const unsigned long long start_cycle = mf->get_l2_memport_push_cycle();
-  const unsigned long long end_cycle = mf->get_l2_fill_complete_cycle();
-  if (start_cycle == 0 || end_cycle < start_cycle) return;
+  mem_fetch *request_mf = l2_trace_request_mf(transport_mf);
+  if (request_mf == NULL || !service_mf->has_l2_fill_complete_cycle()) return;
 
-  mem_fetch *info_mf = l2_trace_info_mf(mf);
-  if (info_mf == NULL) return;
+  const unsigned long long start_cycle =
+      request_mf->get_l2_memport_push_cycle();
+  const unsigned long long end_cycle =
+      service_mf->get_l2_fill_complete_cycle();
+  if (end_cycle < start_cycle) return;
 
-  unsigned shader_id = info_mf->get_sid();
+  const mem_fetch_trace_metadata *metadata =
+      transport_mf->get_trace_metadata();
+  if (metadata == NULL) metadata = request_mf->get_trace_metadata();
+
+  unsigned shader_id = transport_mf->get_sid();
+  if (shader_id == (unsigned)-1) shader_id = request_mf->get_sid();
   unsigned scheduler_id = 0;
   unsigned kernel_uid = (unsigned)-1;
   std::string kernel_name = "unknown_kernel";
-  if (!info_mf->get_inst().empty()) {
-    scheduler_id = info_mf->get_inst().get_scheduler_id();
-    kernel_uid = info_mf->get_inst().get_kernel_uid();
-    if (!info_mf->get_inst().get_kernel_name().empty()) {
-      kernel_name = info_mf->get_inst().get_kernel_name();
-    }
+  if (metadata != NULL && metadata->valid) {
+    scheduler_id = metadata->scheduler_id;
+    kernel_uid = metadata->kernel_uid;
+    if (!metadata->kernel_name.empty()) kernel_name = metadata->kernel_name;
   }
 
   if (kernel_uid == (unsigned)-1 && gpu != NULL &&
@@ -111,10 +121,16 @@ static void log_l2_to_icnt_timing(mem_fetch *mf, gpgpu_sim *gpu) {
   snprintf(filename, sizeof(filename), "%s/l2_to_icnt_timing.txt",
            scheduler_folder);
 
-  char line[256];
+  char line[512];
   snprintf(line, sizeof(line),
-           "request_uid=%u start_cycle=%llu end_cycle=%llu elapsed_cycle=%llu\n",
-           mf->get_request_uid(), start_cycle, end_cycle,
+           "request_uid=%u transport_uid=%u service_uid=%u addr=0x%llx "
+           "sector_mask=0x%llx size=%u start_cycle=%llu end_cycle=%llu "
+           "elapsed_cycle=%llu\n",
+           request_mf->get_request_uid(), transport_mf->get_request_uid(),
+           service_mf->get_request_uid(),
+           (unsigned long long)transport_mf->get_addr(),
+           (unsigned long long)transport_mf->get_access_sector_mask().to_ullong(),
+           transport_mf->get_access_size(), start_cycle, end_cycle,
            end_cycle - start_cycle);
   TraceFileManager::instance().write_line(filename, line);
 }
@@ -585,6 +601,12 @@ memory_sub_partition::~memory_sub_partition() {
 }
 
 void memory_sub_partition::cache_cycle(unsigned cycle) {
+  // `cycle` is a legacy 32-bit parameter even though callers supply the
+  // simulator's 64-bit global cycle. Keep trace timestamps full-width so long
+  // workloads do not wrap at 2^32 cycles.
+  const unsigned long long completion_cycle =
+      m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle;
+
   // L2 fill responses
   if (!m_config->m_L2_config.disabled()) {
     if (m_L2cache->access_ready() && !m_L2_icnt_queue->full()) {
@@ -592,19 +614,23 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
       if (mf->get_access_type() !=
           L2_WR_ALLOC_R) {  // Don't pass write allocate read request back to
                             // upper level cache
-        mf->set_l2_fill_complete_cycle(cycle);
+        mf->set_l2_fill_complete_cycle(completion_cycle);
         mf->set_reply();
-        mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE, cycle);
-        log_l2_to_icnt_timing(mf, m_gpu);
+        mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE, completion_cycle);
+        if (mf->get_src_chiplet() == m_chiplet_id &&
+            (m_lrc == NULL || mf->get_is_write()))
+          log_l2_to_icnt_timing(mf, mf, m_gpu);
         m_L2_icnt_queue->push(mf);
       } else {
         if (m_config->m_L2_config.m_write_alloc_policy == FETCH_ON_WRITE) {
           mem_fetch *original_wr_mf = mf->get_original_wr_mf();
           assert(original_wr_mf);
-          original_wr_mf->set_l2_fill_complete_cycle(cycle);
+          original_wr_mf->set_l2_fill_complete_cycle(completion_cycle);
           original_wr_mf->set_reply();
-          original_wr_mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE, cycle);
-          log_l2_to_icnt_timing(original_wr_mf, m_gpu);
+          original_wr_mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,
+                                     completion_cycle);
+          if (original_wr_mf->get_src_chiplet() == m_chiplet_id)
+            log_l2_to_icnt_timing(original_wr_mf, mf, m_gpu);
           m_L2_icnt_queue->push(original_wr_mf);
         }
         m_request_tracker.erase(mf);
@@ -625,11 +651,13 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
         m_dram_L2_queue->pop();
       }
     } else if (!m_L2_icnt_queue->full()) {
-      mf->set_l2_fill_complete_cycle(cycle);
+      mf->set_l2_fill_complete_cycle(completion_cycle);
       if (mf->is_write() && mf->get_type() == WRITE_ACK)
         mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,
                        m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
-      log_l2_to_icnt_timing(mf, m_gpu);
+      if (mf->get_src_chiplet() == m_chiplet_id &&
+          (m_lrc == NULL || mf->get_is_write()))
+        log_l2_to_icnt_timing(mf, mf, m_gpu);
       m_L2_icnt_queue->push(mf);
       m_dram_L2_queue->pop();
     }
@@ -699,14 +727,19 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
             // L2 cache replies
             assert(!read_sent);
             if (mf->get_access_type() == L1_WRBK_ACC) {
+              mf->set_l2_fill_complete_cycle(completion_cycle);
+              if (mf->get_src_chiplet() == m_chiplet_id)
+                log_l2_to_icnt_timing(mf, mf, m_gpu);
               m_request_tracker.erase(mf);
               delete mf;
             } else {
-              mf->set_l2_fill_complete_cycle(cycle);
+              mf->set_l2_fill_complete_cycle(completion_cycle);
               mf->set_reply();
               mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,
                              m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
-              log_l2_to_icnt_timing(mf, m_gpu);
+              if (mf->get_src_chiplet() == m_chiplet_id &&
+                  (m_lrc == NULL || mf->get_is_write()))
+                log_l2_to_icnt_timing(mf, mf, m_gpu);
               m_L2_icnt_queue->push(mf);
             }
             accepted = true;
@@ -724,14 +757,18 @@ void memory_sub_partition::cache_cycle(unsigned cycle) {
                    LAZY_FETCH_ON_READ) &&
               !was_writeallocate_sent(events)) {
             if (mf->get_access_type() == L1_WRBK_ACC) {
+              mf->set_l2_fill_complete_cycle(completion_cycle);
+              if (mf->get_src_chiplet() == m_chiplet_id)
+                log_l2_to_icnt_timing(mf, mf, m_gpu);
               m_request_tracker.erase(mf);
               delete mf;
             } else if (m_config->m_L2_config.get_write_policy() == WRITE_BACK) {
-              mf->set_l2_fill_complete_cycle(cycle);
+              mf->set_l2_fill_complete_cycle(completion_cycle);
               mf->set_reply();
               mf->set_status(IN_PARTITION_L2_TO_ICNT_QUEUE,
                              m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);
-              log_l2_to_icnt_timing(mf, m_gpu);
+              if (mf->get_src_chiplet() == m_chiplet_id)
+                log_l2_to_icnt_timing(mf, mf, m_gpu);
               m_L2_icnt_queue->push(mf);
             }
           }
@@ -1115,9 +1152,13 @@ bool L2RequestCoalescer::insert(new_addr_type sector_addr, mem_fetch *mf) {
   auto entries = m_lrc_queue.equal_range(sector_addr);
   // Then we iterate through existing entries to find mergeable entry
   for (auto it = entries.first; it != entries.second; ++it) {
-    if (it->first == sector_addr && it->second.size() < m_max_merged) {
+    mem_fetch *base_mf = it->second.front().first;
+    if (it->first == sector_addr && it->second.size() < m_max_merged &&
+        !base_mf->has_l2_fill_complete_cycle()) {
       // Found the sector address in the queue and the entry still have space
-      // left to merge
+      // left to merge. A completed entry is closed: merging into a reply that
+      // already finished L2 service would give the late request no real
+      // service interval and can make its end precede its start.
       it->second.push_back(std::make_pair(mf, false));
       m_total_coalesced_count++;
       return false;

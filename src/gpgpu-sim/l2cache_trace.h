@@ -29,6 +29,7 @@
 #pragma once
 
 #include "../trace.h"
+#include "trace_file_manager.h"
 
 #if TRACING_ON
 
@@ -42,68 +43,32 @@
   (DTRACE(x) && (Trace::sampling_memory_partition == -1 || \
                  Trace::sampling_memory_partition == (int)m_id))
 
-// Intended to be called from inside components of a memory partition
-// Depends on a get_mpid() function
-/*
+// Intended to be called from inside components of a memory partition.
+// Filename-keyed managed handles prevent per-call-site truncation.
 #define MEMPART_DPRINTF(...)                                                   \
   do {                                                                         \
     if (MEMPART_DTRACE(MEMORY_PARTITION_UNIT)) {                               \
-      printf(                                                                  \
-          MEMPART_PRINT_STR, m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,  \
-          Trace::trace_streams_str[Trace::MEMORY_PARTITION_UNIT], get_mpid()); \
-      printf(__VA_ARGS__);                                                     \
+      const char *trace_path = getenv("MEMPART_TRACE_FILE");                   \
+      if (trace_path == NULL) trace_path = "/tmp/mempart_trace.log";           \
+      TraceFileManager::instance().writef(                                     \
+          trace_path, MEMPART_PRINT_STR,                                       \
+          m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,                     \
+          Trace::trace_streams_str[Trace::MEMORY_PARTITION_UNIT],              \
+          get_mpid());                                                         \
+      TraceFileManager::instance().writef(trace_path, __VA_ARGS__);             \
     }                                                                          \
   } while (0)
-*/
-#define MEMPART_DPRINTF(...)                                                   \
-  do {                                                                         \
-    if (MEMPART_DTRACE(MEMORY_PARTITION_UNIT)) {                               \
-      static FILE* mempart_trace_file = NULL;                                  \
-      if (mempart_trace_file == NULL) {                                        \
-        const char* trace_path = getenv("MEMPART_TRACE_FILE");                 \
-        if (trace_path == NULL) trace_path = "/tmp/mempart_trace.log";         \
-        mempart_trace_file = fopen(trace_path, "w");                           \
-      }                                                                        \
-      if (mempart_trace_file != NULL) {                                        \
-        fprintf(                                                               \
-            mempart_trace_file,                                                \
-            MEMPART_PRINT_STR, m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,\
-            Trace::trace_streams_str[Trace::MEMORY_PARTITION_UNIT], get_mpid()); \
-        fprintf(mempart_trace_file, __VA_ARGS__);                              \
-        fflush(mempart_trace_file);                                            \
-      }                                                                        \
-    }                                                                          \
-  } while (0)
-
-
-/*
-#define MEM_SUBPART_DPRINTF(...)                                               \
-  do {                                                                         \
-    if (MEM_SUBPART_DTRACE(MEMORY_PARTITION_UNIT)) {                           \
-      printf(MEM_SUBPART_PRINT_STR,                                            \
-             m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,                  \
-             Trace::trace_streams_str[Trace::MEMORY_SUBPARTITION_UNIT], m_id); \
-      printf(__VA_ARGS__);                                                     \
-    }                                                                          \
-  } while (0)
-*/
 
 #define MEM_SUBPART_DPRINTF(...)                                               \
   do {                                                                         \
     if (MEM_SUBPART_DTRACE(MEMORY_PARTITION_UNIT)) {                           \
-      static FILE* mempart_trace_file = NULL;                                  \
-      if (mempart_trace_file == NULL) {                                        \
-        const char* trace_path = getenv("MEMPART_TRACE_FILE");                 \
-        if (trace_path == NULL) trace_path = "/tmp/memsubpart_trace.log";         \
-        mempart_trace_file = fopen(trace_path, "w");                           \
-      }                                                                        \
-      if (mempart_trace_file != NULL) {                                        \
-        fprintf(mempart_trace_file, MEM_SUBPART_PRINT_STR,                     \
-               m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,                \
-               Trace::trace_streams_str[Trace::MEMORY_SUBPARTITION_UNIT], m_id);\
-        fprintf(mempart_trace_file, __VA_ARGS__);                              \
-        fflush(mempart_trace_file);                                            \
-      }                                                                        \
+      const char *trace_path = getenv("MEMPART_TRACE_FILE");                   \
+      if (trace_path == NULL) trace_path = "/tmp/memsubpart_trace.log";        \
+      TraceFileManager::instance().writef(                                     \
+          trace_path, MEM_SUBPART_PRINT_STR,                                   \
+          m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle,                     \
+          Trace::trace_streams_str[Trace::MEMORY_SUBPARTITION_UNIT], m_id);     \
+      TraceFileManager::instance().writef(trace_path, __VA_ARGS__);             \
     }                                                                          \
   } while (0)
 

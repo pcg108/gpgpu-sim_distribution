@@ -53,8 +53,7 @@ void mem_access_t::init(gpgpu_context *ctx) {
 
 void warp_inst_t::issue(const active_mask_t &mask, unsigned warp_id,
                         unsigned long long cycle, int dynamic_warp_id,
-                        int sch_id, unsigned long long streamID, int sm_id,
-                        int scheduler_id) {
+                        int sch_id, unsigned long long streamID) {
   m_warp_active_mask = mask;
   m_warp_issued_mask = mask;
   m_uid = ++(m_config->gpgpu_ctx->warp_inst_sm_next_uid);
@@ -66,11 +65,6 @@ void warp_inst_t::issue(const active_mask_t &mask, unsigned warp_id,
   m_cache_hit = false;
   m_empty = false;
   m_scheduler_id = sch_id;
-
-  // which SM and scheduler this instruction is part of
-  // maybe the scheduler is already included above but just adding it for myself
-  m_sm_id = sm_id;
-  m_sched_id = scheduler_id;
 }
 
 checkpoint::checkpoint() {

@@ -63,30 +63,39 @@ static bool log_cache_traces_enabled() {
   return enabled;
 }
 
-static unsigned trace_kernel_uid(kernel_info_t *kernel,
-                                 const warp_inst_t *inst) {
-  if (kernel != NULL) return kernel->get_trace_kernel_id();
+static unsigned trace_kernel_uid(
+    kernel_info_t *kernel, const warp_inst_t *inst,
+    const mem_fetch_trace_metadata *metadata) {
+  if (metadata != NULL && metadata->valid &&
+      metadata->kernel_uid != (unsigned)-1)
+    return metadata->kernel_uid;
   if (inst != NULL && inst->get_kernel_uid() != (unsigned)-1)
     return inst->get_kernel_uid();
+  if (kernel != NULL) return kernel->get_trace_kernel_id();
   return (unsigned)-1;
 }
 
-static std::string trace_kernel_name(kernel_info_t *kernel,
-                                     const warp_inst_t *inst) {
-  if (kernel != NULL) return kernel->get_name();
+static std::string trace_kernel_name(
+    kernel_info_t *kernel, const warp_inst_t *inst,
+    const mem_fetch_trace_metadata *metadata) {
+  if (metadata != NULL && metadata->valid && !metadata->kernel_name.empty())
+    return metadata->kernel_name;
   if (inst != NULL && !inst->get_kernel_name().empty())
     return inst->get_kernel_name();
+  if (kernel != NULL) return kernel->get_name();
   return "unknown_kernel";
 }
 
 static std::string trace_kernel_dir(const char *root, kernel_info_t *kernel,
-                                    const warp_inst_t *inst) {
+                                    const warp_inst_t *inst,
+                                    const mem_fetch_trace_metadata *metadata =
+                                        NULL) {
   ensure_directory_exists(root);
 
   char dirname[4096];
   std::string kernel_dir =
-      trace_kernel_dir_name(trace_kernel_uid(kernel, inst),
-                            trace_kernel_name(kernel, inst));
+      trace_kernel_dir_name(trace_kernel_uid(kernel, inst, metadata),
+                            trace_kernel_name(kernel, inst, metadata));
   snprintf(dirname, sizeof(dirname), "%s/%s", root, kernel_dir.c_str());
   ensure_directory_exists(dirname);
   return dirname;
@@ -94,8 +103,10 @@ static std::string trace_kernel_dir(const char *root, kernel_info_t *kernel,
 
 static std::string trace_shader_dir(const char *root, kernel_info_t *kernel,
                                     const warp_inst_t *inst,
-                                    unsigned shader_id) {
-  std::string kernel_dir = trace_kernel_dir(root, kernel, inst);
+                                    unsigned shader_id,
+                                    const mem_fetch_trace_metadata *metadata =
+                                        NULL) {
+  std::string kernel_dir = trace_kernel_dir(root, kernel, inst, metadata);
   char dirname[4096];
   snprintf(dirname, sizeof(dirname), "%s/shader_%u", kernel_dir.c_str(),
            shader_id);
@@ -106,8 +117,11 @@ static std::string trace_shader_dir(const char *root, kernel_info_t *kernel,
 static std::string trace_scheduler_dir(const char *root, kernel_info_t *kernel,
                                        const warp_inst_t *inst,
                                        unsigned shader_id,
-                                       unsigned scheduler_id) {
-  std::string shader_dir = trace_shader_dir(root, kernel, inst, shader_id);
+                                       unsigned scheduler_id,
+                                       const mem_fetch_trace_metadata *metadata =
+                                           NULL) {
+  std::string shader_dir =
+      trace_shader_dir(root, kernel, inst, shader_id, metadata);
   char dirname[4096];
   snprintf(dirname, sizeof(dirname), "%s/scheduler_%u", shader_dir.c_str(),
            scheduler_id);
@@ -150,17 +164,26 @@ static void log_dcache_access(kernel_info_t *kernel, unsigned shader_id,
   if (!log_cache_traces_enabled() || mf == NULL) return;
 
   const warp_inst_t &inst = mf->get_inst();
-  std::string dirname =
-      trace_scheduler_dir("dcache_status", kernel, &inst, shader_id,
-                          scheduler_id);
+  const mem_fetch_trace_metadata *metadata = mf->get_trace_metadata();
+  if (metadata != NULL && metadata->valid) {
+    shader_id = mf->get_sid();
+    scheduler_id = metadata->scheduler_id;
+  }
+  std::string dirname = trace_scheduler_dir(
+      "dcache_status", kernel, &inst, shader_id, scheduler_id, metadata);
   char filename[4096];
   snprintf(filename, sizeof(filename), "%s/dcache_access.txt",
            dirname.c_str());
 
   char line[512];
+  const address_type pc =
+      metadata != NULL && metadata->valid ? metadata->pc : inst.pc;
+  const unsigned warp_id = metadata != NULL && metadata->valid
+                               ? metadata->warp_id
+                               : inst.warp_id();
   snprintf(line, sizeof(line),
            "request_uid=%u PC=0x%08llx warp=%u addr=0x%llx size=%u status=%s\n",
-           mf->get_request_uid(), (unsigned long long)inst.pc, inst.warp_id(),
+           mf->get_request_uid(), (unsigned long long)pc, warp_id,
            (unsigned long long)mf->get_addr(), mf->get_access_size(),
            cache_request_status_str(status));
   TraceFileManager::instance().write_line(filename, line);
@@ -1224,8 +1247,7 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
   (*pipe_reg)->issue(
       active_mask, warp_id, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle,
       m_warp[warp_id]->get_dynamic_warp_id(), sch_id,
-      m_warp[warp_id]->get_streamID(), m_sid,
-      sch_id);  // dynamic instruction information
+      m_warp[warp_id]->get_streamID());  // dynamic instruction information
   m_stats->shader_cycle_distro[2 + (*pipe_reg)->active_count()]++;
   schedulers[sch_id]->log_issue_cycle((*pipe_reg)->active_count());
   func_exec_inst(**pipe_reg);
@@ -2542,7 +2564,7 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
       } else {
         result = BK_CONF;
         m_stats->gpgpu_n_l1cache_bkconflict++;
-        log_dcache_access(m_core->get_kernel(), m_sid, inst.get_scheduler_id(),
+        log_dcache_access(m_core->get_kernel(), m_sid, inst.get_schd_id(),
                           mf, RESERVATION_FAIL);
         delete mf;
         break;  // do not try again, just break from the loop and try the next
@@ -2562,7 +2584,7 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
         mf->get_addr(), mf,
         m_core->get_gpu()->gpu_sim_cycle + m_core->get_gpu()->gpu_tot_sim_cycle,
         events);
-    log_dcache_access(m_core->get_kernel(), m_sid, inst.get_scheduler_id(), mf,
+    log_dcache_access(m_core->get_kernel(), m_sid, inst.get_schd_id(), mf,
                       status);
     return process_cache_access(cache, mf->get_addr(), inst, events, mf,
                                 status);
@@ -2580,7 +2602,7 @@ void ldst_unit::L1_latency_queue_cycle() {
                             m_core->get_gpu()->gpu_tot_sim_cycle,
                         events);
       log_dcache_access(m_core->get_kernel(), m_sid,
-                        mf_next->get_inst().get_scheduler_id(), mf_next,
+                        mf_next->get_inst().get_schd_id(), mf_next,
                         status);
 
       bool write_sent = was_write_sent(events);

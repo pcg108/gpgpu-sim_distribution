@@ -31,8 +31,8 @@
 #define __SHADER_TRACE_H__
 
 #include "../trace.h"
-#include <sys/stat.h>
 #include <string>
+#include "trace_file_manager.h"
 
 #if TRACING_ON
 
@@ -56,88 +56,38 @@
     }                                                         \
   } while (0)
 
-/*
-// Intended to be called from inside a scheduler_unit.
-// Depends on a m_id member
-#define SCHED_DPRINTF(...)                                               \
-  do {                                                                   \
-    if (SHADER_DTRACE(WARP_SCHEDULER)) {                                 \
-      printf(SCHED_PRINT_STR,                                            \
-             m_shader->get_gpu()->gpu_sim_cycle +                        \
-                 m_shader->get_gpu()->gpu_tot_sim_cycle,                 \
-             Trace::trace_streams_str[Trace::WARP_SCHEDULER], get_sid(), \
-             m_id);                                                      \
-      printf(__VA_ARGS__);                                               \
-    }                                                                    \
-  } while (0)
-*/
-#define SCHED_DPRINTF(...)                                               \
-  do {                                                                   \
-    if (SHADER_DTRACE(WARP_SCHEDULER)) {                                 \
-      static FILE* sched_trace_file = NULL;                              \
-      static unsigned int last_kernel_uid = (unsigned int)(-1);          \
-      static int last_cluster_id = -1;                                   \
-      static int last_core_id = -1;                                      \
-      static int last_scheduler_id = -1;                                 \
-      unsigned int current_kernel_uid = (unsigned int)(-1);              \
-      kernel_info_t *current_kernel = m_shader->get_kernel();            \
-      if (current_kernel) {                                              \
-        current_kernel_uid = current_kernel->get_trace_kernel_id();      \
-      } else {                                                            \
-        current_kernel_uid = m_shader->get_gpu()->last_uid;              \
-      }                                                                   \
-      int current_cluster_id = m_shader->get_cluster_id();               \
-      int current_core_id = get_sid();                                   \
-      int current_scheduler_id = m_id;                                   \
-      \
-      /* Check if kernel, cluster, core, or scheduler changed */ \
-      if (current_kernel_uid != last_kernel_uid ||                       \
-          current_cluster_id != last_cluster_id ||                       \
-          current_core_id != last_core_id ||                             \
-          current_scheduler_id != last_scheduler_id) {                   \
-        if (sched_trace_file != NULL) {                                  \
-          fclose(sched_trace_file);                                      \
-          sched_trace_file = NULL;                                       \
-        }                                                                 \
-        last_kernel_uid = current_kernel_uid;                            \
-        last_cluster_id = current_cluster_id;                            \
-        last_core_id = current_core_id;                                  \
-        last_scheduler_id = current_scheduler_id;                        \
-      }                                                                   \
-      \
-      if (sched_trace_file == NULL) {                                    \
-        const char* trace_dir = getenv("SCHED_TRACE_DIR");              \
-        if (trace_dir == NULL) trace_dir = "scheduler_traces";         \
-        \
-        /* Create base trace directory if it doesn't exist */ \
-        mkdir(trace_dir, 0755);                                          \
-        \
-        /* Create kernel and cluster subdirectories */ \
-        std::string kernel_dir = std::string(trace_dir) + "/kernel_" +   \
-                                 std::to_string(current_kernel_uid) + "/"; \
-        mkdir(kernel_dir.c_str(), 0755);                                 \
-        std::string cluster_dir = kernel_dir + "cluster_" +              \
-                                  std::to_string(current_cluster_id) + "/"; \
-        mkdir(cluster_dir.c_str(), 0755);                                \
-        \
-        /* Create filename with core and scheduler ID */ \
-        std::string filename = cluster_dir + "core_" +                   \
-                               std::to_string(current_core_id) +         \
-                               "_scheduler_" +                           \
-                               std::to_string(current_scheduler_id) + ".txt"; \
-        sched_trace_file = fopen(filename.c_str(), "a");                 \
-      }                                                                   \
-      \
-      if (sched_trace_file != NULL) {                                    \
-        fprintf(sched_trace_file, SCHED_PRINT_STR,                       \
-               m_shader->get_gpu()->gpu_sim_cycle +                      \
-                   m_shader->get_gpu()->gpu_tot_sim_cycle,               \
-               Trace::trace_streams_str[Trace::WARP_SCHEDULER], get_sid(), \
-               m_id);                                                    \
-        fprintf(sched_trace_file, __VA_ARGS__);                          \
-        fflush(sched_trace_file);                                        \
-      }                                                                   \
-    }                                                                    \
+// Intended to be called from inside a scheduler_unit. Handles are keyed by
+// filename so alternating schedulers do not close and reopen files each cycle.
+#define SCHED_DPRINTF(...)                                                  \
+  do {                                                                      \
+    if (SHADER_DTRACE(WARP_SCHEDULER)) {                                    \
+      unsigned current_kernel_uid = (unsigned)-1;                           \
+      kernel_info_t *current_kernel = m_shader->get_kernel();               \
+      if (current_kernel == NULL) break;                                    \
+      current_kernel_uid = current_kernel->get_trace_kernel_id();           \
+      const int current_cluster_id = m_shader->get_cluster_id();            \
+      const int current_core_id = get_sid();                                \
+      const int current_scheduler_id = m_id;                                \
+      const char *trace_dir = getenv("SCHED_TRACE_DIR");                    \
+      if (trace_dir == NULL) trace_dir = "scheduler_traces";                \
+      ensure_directory_exists(trace_dir);                                   \
+      std::string kernel_dir = std::string(trace_dir) + "/" +              \
+                               trace_kernel_uid_dir_name(current_kernel_uid); \
+      ensure_directory_exists(kernel_dir.c_str());                          \
+      std::string cluster_dir = kernel_dir + "/cluster_" +                 \
+                                std::to_string(current_cluster_id);          \
+      ensure_directory_exists(cluster_dir.c_str());                         \
+      std::string filename = cluster_dir + "/core_" +                      \
+                             std::to_string(current_core_id) +              \
+                             "_scheduler_" +                                \
+                             std::to_string(current_scheduler_id) + ".txt";  \
+      TraceFileManager::instance().writef(                                  \
+          filename, SCHED_PRINT_STR,                                        \
+          m_shader->get_gpu()->gpu_sim_cycle +                              \
+              m_shader->get_gpu()->gpu_tot_sim_cycle,                       \
+          Trace::trace_streams_str[Trace::WARP_SCHEDULER], get_sid(), m_id); \
+      TraceFileManager::instance().writef(filename, __VA_ARGS__);            \
+    }                                                                       \
   } while (0)
 
 

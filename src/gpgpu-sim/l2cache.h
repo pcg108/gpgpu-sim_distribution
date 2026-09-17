@@ -48,7 +48,13 @@
 // std::pair<mem_fetch *, bool>: mf, reply_sent
 typedef std::vector<std::pair<mem_fetch *, bool>> LRCEntry;
 class mem_fetch;
+class gpgpu_sim;
 class L2RequestCoalescer;
+
+// Log the completed L2 service for a transport request. service_mf may differ
+// when sector requests are coalesced by the L2 request coalescer.
+void log_l2_to_icnt_timing(mem_fetch *transport_mf, mem_fetch *service_mf,
+                           gpgpu_sim *gpu);
 
 // FIFO queue with latency modeling - elements have a ready cycle.
 // sim_cycle and tot_sim_cycle are non-owning references to gpgpu_sim's

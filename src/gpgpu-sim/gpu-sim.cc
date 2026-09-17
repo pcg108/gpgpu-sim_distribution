@@ -1035,9 +1035,10 @@ void gpgpu_sim::set_kernel_done(kernel_info_t *kernel) {
         kernel->end_cycle - kernel->start_cycle;
     const std::string filename =
         "stall_breakdown/kernel_" + std::to_string(kernel_id) + "_" +
-        sanitize_log_name(kernel->name()) + "_shader_cycle_distro.txt";
+        bounded_trace_component(sanitize_log_name(kernel->name())) +
+        "_shader_cycle_distro.txt";
 
-    system("mkdir -p stall_breakdown");
+    ensure_directory_exists("stall_breakdown");
     FILE *fout = fopen(filename.c_str(), "w");
     if (fout != NULL) {
       fprintf(fout, "kernel_name = %s\n", kernel->name().c_str());
@@ -1049,6 +1050,9 @@ void gpgpu_sim::set_kernel_done(kernel_info_t *kernel) {
       fprintf(fout, "\n");
       print_shader_cycle_distro(fout);
       fclose(fout);
+    } else {
+      fprintf(stderr, "Failed to open stall breakdown '%s': %s\n",
+              filename.c_str(), strerror(errno));
     }
   }
 }
@@ -2714,6 +2718,7 @@ void gpgpu_sim::handle_lrc_reply(unsigned subpartition_id, mem_fetch *mf,
         handle_mf_reply(subpartition_id, merged_mf, parallel_reply_count);
 
     if (success) {
+      log_l2_to_icnt_timing(merged_mf, mf, this);
       // Set reply_sent to true for this mf
       reply_sent = true;
     } else {

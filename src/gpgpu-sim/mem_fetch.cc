@@ -36,6 +36,36 @@
 unsigned mem_fetch::sm_next_mf_request_uid = 1;
 std::vector<void *> mem_fetch::s_free_list;
 
+void mem_fetch::initialize_trace_metadata(const warp_inst_t *inst,
+                                          const mem_fetch *original,
+                                          const mem_fetch *original_write) {
+  if (inst != NULL && !inst->empty()) {
+    std::shared_ptr<mem_fetch_trace_metadata> metadata =
+        std::make_shared<mem_fetch_trace_metadata>();
+    metadata->valid = true;
+    metadata->kernel_uid = inst->get_kernel_uid();
+    metadata->kernel_name = inst->get_kernel_name();
+    metadata->pc = inst->pc;
+    metadata->warp_id = inst->warp_id();
+    metadata->dynamic_wid = inst->dynamic_warp_id();
+    metadata->inst_ordinal = inst->get_inst_ordinal();
+    metadata->scheduler_id = inst->get_schd_id();
+    m_trace_metadata = metadata;
+  } else if (original != NULL && original->m_trace_metadata) {
+    m_trace_metadata = original->m_trace_metadata;
+  } else if (original_write != NULL && original_write->m_trace_metadata) {
+    m_trace_metadata = original_write->m_trace_metadata;
+  } else {
+    m_trace_metadata.reset();
+  }
+}
+
+void mem_fetch::inherit_trace_metadata(const mem_fetch *source) {
+  if (source == NULL) return;
+  m_trace_metadata = source->m_trace_metadata;
+  m_dynamic_wid = source->m_dynamic_wid;
+}
+
 void *mem_fetch::operator new(size_t size) {
   if (!s_free_list.empty()) {
     void *ptr = s_free_list.back();
@@ -72,6 +102,7 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
     else
       m_dynamic_wid = (unsigned)-1;
   }
+  initialize_trace_metadata(inst, m_original_mf, m_original_wr_mf);
   m_streamID = streamID;
   m_data_size = access.get_size();
   m_ctrl_size = ctrl_size;
@@ -99,6 +130,8 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
   m_icnt_receive_time = 0;
   m_l2_memport_push_cycle = 0;
   m_l2_fill_complete_cycle = 0;
+  m_l2_memport_push_cycle_valid = false;
+  m_l2_fill_complete_cycle_valid = false;
   m_status = MEM_FETCH_INITIALIZED;
   m_status_change = cycle;
   m_mem_config = config;
@@ -131,6 +164,7 @@ mem_fetch::mem_fetch(const mem_access_t &access,
   } else {
     m_dynamic_wid = (unsigned)-1;
   }
+  initialize_trace_metadata(inst_ptr.get(), m_original_mf, m_original_wr_mf);
   m_streamID = streamID;
   m_data_size = access.get_size();
   m_ctrl_size = ctrl_size;
@@ -156,6 +190,8 @@ mem_fetch::mem_fetch(const mem_access_t &access,
   m_icnt_receive_time = 0;
   m_l2_memport_push_cycle = 0;
   m_l2_fill_complete_cycle = 0;
+  m_l2_memport_push_cycle_valid = false;
+  m_l2_fill_complete_cycle_valid = false;
   m_status = MEM_FETCH_INITIALIZED;
   m_status_change = cycle;
   m_mem_config = config;

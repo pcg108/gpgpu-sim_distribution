@@ -34,9 +34,11 @@
 #define TRACE_FILE_MANAGER_H
 
 #include <cerrno>
+#include <cstdarg>
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <set>
 #include <string>
 #include <sys/stat.h>
 
@@ -73,6 +75,10 @@ inline std::string trace_kernel_dir_name(unsigned kernel_uid,
          bounded_trace_component(kernel_name);
 }
 
+inline std::string trace_kernel_uid_dir_name(unsigned kernel_uid) {
+  return "kernel_" + std::to_string(kernel_uid);
+}
+
 // Singleton class to manage persistent file handles for trace logging.
 // This avoids the overhead of opening/closing files on every log call.
 class TraceFileManager {
@@ -82,26 +88,17 @@ class TraceFileManager {
     return inst;
   }
 
-  bool is_critical_trace_file(const std::string &filename) const {
-    return filename.find("l2_to_icnt_timing.txt") != std::string::npos ||
-           filename.find("l1_to_l2_requests.txt") != std::string::npos ||
-           filename.find("ldst_unit_entries.txt") != std::string::npos ||
-           filename.find("icache_access.txt") != std::string::npos ||
-           filename.find("dcache_access.txt") != std::string::npos ||
-           filename.find("warp_assignments/") != std::string::npos;
-  }
-
   FILE *get_file(const std::string &filename) {
     auto it = m_files.find(filename);
     if (it != m_files.end()) {
       return it->second;
     }
-    // Open new file (truncate on first open)
-    FILE *f = fopen(filename.c_str(), "w");
+    // Truncate once per simulator process, then append if a per-kernel close
+    // causes a late request to reopen the same path.
+    const bool first_open = m_opened_files.insert(filename).second;
+    FILE *f = fopen(filename.c_str(), first_open ? "w" : "a");
     if (f) {
-      if (is_critical_trace_file(filename)) {
-        setvbuf(f, NULL, _IOLBF, 0);
-      }
+      setvbuf(f, NULL, _IOFBF, 64 * 1024);
       m_files[filename] = f;
       m_write_count[filename] = 0;
     } else {
@@ -114,9 +111,11 @@ class TraceFileManager {
   void close_kernel_files(unsigned kernel_uid, const std::string &kernel_name) {
     const std::string kernel_dir =
         trace_kernel_dir_name(kernel_uid, kernel_name);
+    const std::string kernel_uid_dir = trace_kernel_uid_dir_name(kernel_uid);
 
     for (auto it = m_files.begin(); it != m_files.end();) {
-      if (is_kernel_file(it->first, kernel_dir)) {
+      if (is_kernel_file(it->first, kernel_dir) ||
+          is_kernel_file(it->first, kernel_uid_dir)) {
         if (it->second) {
           fflush(it->second);
           fclose(it->second);
@@ -133,15 +132,18 @@ class TraceFileManager {
     FILE *f = get_file(filename);
     if (f) {
       fputs(line, f);
-      m_write_count[filename]++;
-      if (is_critical_trace_file(filename)) {
-        fflush(f);
-        return;
-      }
-      // Flush every N writes to balance performance and data safety
-      if (m_write_count[filename] % 10000 == 0) {
-        fflush(f);
-      }
+      record_write(filename, f);
+    }
+  }
+
+  void writef(const std::string &filename, const char *format, ...) {
+    FILE *f = get_file(filename);
+    if (f) {
+      va_list args;
+      va_start(args, format);
+      vfprintf(f, format, args);
+      va_end(args);
+      record_write(filename, f);
     }
   }
 
@@ -162,14 +164,17 @@ class TraceFileManager {
     m_write_count.clear();
   }
 
-  ~TraceFileManager() {
-    close_all();
-  }
+  ~TraceFileManager() { close_all(); }
 
  private:
-	  TraceFileManager() {}
-	  TraceFileManager(const TraceFileManager &) = delete;
-	  TraceFileManager &operator=(const TraceFileManager &) = delete;
+  TraceFileManager() {}
+  TraceFileManager(const TraceFileManager &) = delete;
+  TraceFileManager &operator=(const TraceFileManager &) = delete;
+
+  void record_write(const std::string &filename, FILE *f) {
+    const unsigned long long count = ++m_write_count[filename];
+    if (count % 4096 == 0) fflush(f);
+  }
 
   bool is_kernel_file(const std::string &filename,
                       const std::string &kernel_dir) const {
@@ -182,8 +187,9 @@ class TraceFileManager {
     return component_start && component_end;
   }
 
-	  std::map<std::string, FILE *> m_files;
-	  std::map<std::string, unsigned long long> m_write_count;
+  std::map<std::string, FILE *> m_files;
+  std::map<std::string, unsigned long long> m_write_count;
+  std::set<std::string> m_opened_files;
 };
 
 // Helper to ensure directory exists (creates if missing)

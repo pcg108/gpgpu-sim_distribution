@@ -1236,30 +1236,21 @@ void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
   static const char *trace_dir = getenv("L1_TRACE_DIR");
   if (trace_dir == nullptr) return;
 
-  // Check if this is an L1 writeback - if so, use original_mf for instruction info
+  // Request/address fields always describe the transported request. Instruction
+  // attribution comes from immutable trace metadata captured at allocation.
   bool is_l1_writeback = (mf->get_access_type() == L1_WRBK_ACC);
-  mem_fetch *info_mf = mf;
-  if (mf->get_inst().empty() && mf->get_original_mf() != nullptr) {
-    info_mf = mf->get_original_mf();
-  } else if (mf->get_inst().empty() && mf->get_original_wr_mf() != nullptr) {
-    info_mf = mf->get_original_wr_mf();
-  } else if (is_l1_writeback && mf->get_original_mf() != nullptr) {
-    info_mf = mf->get_original_mf();
-  }
-
-  // Get instruction info from mem_fetch (or original_mf for writebacks)
-  unsigned sm_id = info_mf->get_sid();
-  unsigned dynamic_warp_id = info_mf->get_dynamic_wid();
-  address_type pc = info_mf->get_pc();
-  unsigned inst_ordinal = UINT_MAX;
-  if (!info_mf->get_inst().empty()) {
-    inst_ordinal = info_mf->get_inst().get_inst_ordinal();
-  }
+  const mem_fetch_trace_metadata *metadata = mf->get_trace_metadata();
+  unsigned sm_id = mf->get_sid();
+  unsigned dynamic_warp_id =
+      metadata != NULL ? metadata->dynamic_wid : mf->get_dynamic_wid();
+  address_type pc = metadata != NULL ? metadata->pc : mf->get_pc();
+  unsigned inst_ordinal =
+      metadata != NULL ? metadata->inst_ordinal : UINT_MAX;
   new_addr_type addr = mf->get_addr();  // Use actual writeback address
   unsigned access_size = mf->get_access_size();  // Use actual writeback size
   bool is_write = mf->get_is_write();
 
-  unsigned sub_partition_id = info_mf->get_sub_partition_id();
+  unsigned sub_partition_id = mf->get_sub_partition_id();
   unsigned set_index = m_config.set_index(addr);
   new_addr_type tag = m_config.tag(addr);
   auto sector_mask = mf->get_access_sector_mask();
@@ -1268,12 +1259,10 @@ void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
   unsigned scheduler_id = 0;
   unsigned kernel_uid = (unsigned)-1;
   std::string kernel_name = "unknown_kernel";
-  if (!info_mf->get_inst().empty()) {
-    scheduler_id = info_mf->get_inst().get_scheduler_id();
-    kernel_uid = info_mf->get_inst().get_kernel_uid();
-    if (!info_mf->get_inst().get_kernel_name().empty()) {
-      kernel_name = info_mf->get_inst().get_kernel_name();
-    }
+  if (metadata != NULL && metadata->valid) {
+    scheduler_id = metadata->scheduler_id;
+    kernel_uid = metadata->kernel_uid;
+    if (!metadata->kernel_name.empty()) kernel_name = metadata->kernel_name;
   }
 
   if (kernel_uid == (unsigned)-1 && m_gpu != nullptr &&
@@ -1709,7 +1698,8 @@ enum cache_request_status data_cache::wr_miss_wa_naive(
           evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
           evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
           true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1,
-          mf->get_sid(), mf->get_tpc(), mf, mf->get_streamID());
+          mf->get_sid(), mf->get_tpc(), NULL, mf->get_streamID());
+      wb->inherit_trace_metadata(mf);
       // the evicted block may have wrong chip id when advanced L2 hashing  is
       // used, so set the right chip address from the original mf
       wb->set_chip(mf->get_tlx_addr().chip);
@@ -1763,7 +1753,8 @@ enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
             evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
             evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
             true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1,
-            mf->get_sid(), mf->get_tpc(), mf, mf->get_streamID());
+            mf->get_sid(), mf->get_tpc(), NULL, mf->get_streamID());
+        wb->inherit_trace_metadata(mf);
         // the evicted block may have wrong chip id when advanced L2 hashing  is
         // used, so set the right chip address from the original mf
         wb->set_chip(mf->get_tlx_addr().chip);
@@ -1840,7 +1831,8 @@ enum cache_request_status data_cache::wr_miss_wa_fetch_on_write(
             evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
             evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
             true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1,
-            mf->get_sid(), mf->get_tpc(), mf, mf->get_streamID());
+            mf->get_sid(), mf->get_tpc(), NULL, mf->get_streamID());
+        wb->inherit_trace_metadata(mf);
         // the evicted block may have wrong chip id when advanced L2 hashing  is
         // used, so set the right chip address from the original mf
         wb->set_chip(mf->get_tlx_addr().chip);
@@ -1908,7 +1900,8 @@ enum cache_request_status data_cache::wr_miss_wa_lazy_fetch_on_read(
           evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
           evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
           true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1,
-          mf->get_sid(), mf->get_tpc(), mf, mf->get_streamID());
+          mf->get_sid(), mf->get_tpc(), NULL, mf->get_streamID());
+      wb->inherit_trace_metadata(mf);
       // the evicted block may have wrong chip id when advanced L2 hashing  is
       // used, so set the right chip address from the original mf
       wb->set_chip(mf->get_tlx_addr().chip);
@@ -1994,7 +1987,8 @@ enum cache_request_status data_cache::rd_miss_base(
           evicted.m_block_addr, m_wrbk_type, mf->get_access_warp_mask(),
           evicted.m_byte_mask, evicted.m_sector_mask, evicted.m_modified_size,
           true, m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle, -1,
-          mf->get_sid(), mf->get_tpc(), mf, mf->get_streamID());
+          mf->get_sid(), mf->get_tpc(), NULL, mf->get_streamID());
+      wb->inherit_trace_metadata(mf);
       // the evicted block may have wrong chip id when advanced L2 hashing  is
       // used, so set the right chip address from the original mf
       wb->set_chip(mf->get_tlx_addr().chip);

@@ -31,6 +31,7 @@
 
 #include <bitset>
 #include <memory>
+#include <string>
 #include <vector>
 #include "../abstract_hardware_model.h"
 #include "addrdec.h"
@@ -54,6 +55,27 @@ enum mf_type {
 #undef MF_TUP_END
 
 class memory_config;
+
+struct mem_fetch_trace_metadata {
+  mem_fetch_trace_metadata()
+      : valid(false),
+        kernel_uid((unsigned)-1),
+        pc((address_type)-1),
+        warp_id((unsigned)-1),
+        dynamic_wid((unsigned)-1),
+        inst_ordinal(UINT_MAX),
+        scheduler_id(0) {}
+
+  bool valid;
+  unsigned kernel_uid;
+  std::string kernel_name;
+  address_type pc;
+  unsigned warp_id;
+  unsigned dynamic_wid;
+  unsigned inst_ordinal;
+  unsigned scheduler_id;
+};
+
 class mem_fetch {
  public:
   mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
@@ -112,6 +134,10 @@ class mem_fetch {
   unsigned get_tpc() const { return m_tpc; }
   unsigned get_wid() const { return m_wid; }
   unsigned get_dynamic_wid() const { return m_dynamic_wid; }
+  const mem_fetch_trace_metadata *get_trace_metadata() const {
+    return m_trace_metadata.get();
+  }
+  void inherit_trace_metadata(const mem_fetch *source);
   bool istexture() const;
   bool isconst() const;
   enum mf_type get_type() const { return m_type; }
@@ -121,9 +147,11 @@ class mem_fetch {
   void set_icnt_receive_time(unsigned t) { m_icnt_receive_time = t; }
   void set_l2_memport_push_cycle(unsigned long long t) {
     m_l2_memport_push_cycle = t;
+    m_l2_memport_push_cycle_valid = true;
   }
   void set_l2_fill_complete_cycle(unsigned long long t) {
     m_l2_fill_complete_cycle = t;
+    m_l2_fill_complete_cycle_valid = true;
   }
   unsigned get_timestamp() const { return m_timestamp; }
   unsigned get_return_timestamp() const { return m_timestamp2; }
@@ -133,6 +161,12 @@ class mem_fetch {
   }
   unsigned long long get_l2_fill_complete_cycle() const {
     return m_l2_fill_complete_cycle;
+  }
+  bool has_l2_memport_push_cycle() const {
+    return m_l2_memport_push_cycle_valid;
+  }
+  bool has_l2_fill_complete_cycle() const {
+    return m_l2_fill_complete_cycle_valid;
   }
   unsigned long long get_streamID() const { return m_streamID; }
 
@@ -204,9 +238,14 @@ class mem_fetch {
                                                 // L1 cache miss queue to L2
   unsigned long long m_l2_fill_complete_cycle;  // cycle when an L2 miss response
                                                  // becomes ready at L2
+  bool m_l2_memport_push_cycle_valid;
+  bool m_l2_fill_complete_cycle_valid;
 
   // requesting instruction (shared to avoid deep-copying per mem_fetch)
   std::shared_ptr<warp_inst_t> m_inst;
+  // Immutable logging provenance. Unlike original_mf, this has no simulator
+  // ownership or request-lifetime semantics.
+  std::shared_ptr<const mem_fetch_trace_metadata> m_trace_metadata;
 
   unsigned long long m_streamID;
 
@@ -221,6 +260,10 @@ class mem_fetch {
                      // size), so the pointer refers to the original request
   mem_fetch *original_wr_mf;  // this pointer refers to the original write req,
                               // when fetch-on-write policy is used
+
+  void initialize_trace_metadata(const warp_inst_t *inst,
+                                 const mem_fetch *original,
+                                 const mem_fetch *original_write);
 };
 
 #endif
