@@ -36,11 +36,18 @@
 #include <cerrno>
 #include <cstdarg>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <set>
 #include <string>
 #include <sys/stat.h>
+
+// Prefer the canonical name while accepting existing launch environments.
+inline const char *l2_trace_directory() {
+  const char *path = std::getenv("L2_TRACE_DIR");
+  return path != NULL ? path : std::getenv("L1_TRACE_DIR");
+}
 
 inline unsigned long long trace_name_hash(const std::string &name) {
   unsigned long long hash = 1469598103934665603ull;

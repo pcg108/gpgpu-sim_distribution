@@ -66,7 +66,7 @@ static mem_fetch *l2_trace_request_mf(mem_fetch *transport_mf) {
 
 void log_l2_to_icnt_timing(mem_fetch *transport_mf, mem_fetch *service_mf,
                            gpgpu_sim *gpu) {
-  static const char *trace_dir = getenv("L1_TRACE_DIR");
+  static const char *trace_dir = l2_trace_directory();
   if (trace_dir == NULL || transport_mf == NULL) return;
   if (service_mf == NULL) service_mf = transport_mf;
 

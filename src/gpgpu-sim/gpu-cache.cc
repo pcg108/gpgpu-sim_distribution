@@ -1232,8 +1232,8 @@ bool baseline_cache::bandwidth_management::fill_port_free() const {
 
 /// Log L1 to L2 memory requests
 void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
-  // Only log if L1_TRACE_DIR environment variable is set
-  static const char *trace_dir = getenv("L1_TRACE_DIR");
+  // Only log when a trace directory is configured
+  static const char *trace_dir = l2_trace_directory();
   if (trace_dir == nullptr) return;
 
   // Request/address fields always describe the transported request. Instruction
@@ -1271,7 +1271,7 @@ void baseline_cache::log_l1_to_l2_request(mem_fetch *mf) {
   }
 
   // Create folder structure:
-  // <L1_TRACE_DIR>/kernel_<uid>_<name>/shader_<id>/scheduler_<id>/
+  // <L2_TRACE_DIR>/kernel_<uid>_<name>/shader_<id>/scheduler_<id>/
   ensure_directory_exists(trace_dir);
 
   char kernel_folder[1024];
