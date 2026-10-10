@@ -116,6 +116,7 @@ class dram_t {
          class gpgpu_sim *gpu);
 
   bool full(bool is_write) const;
+  bool busy() const;
   void print(FILE *simFile) const;
   void visualize() const;
   void print_stat(FILE *simFile);
@@ -165,6 +166,7 @@ class dram_t {
       rw;  // was last request a read or write? (important for RTW, WTR)
 
   unsigned int pending_writes;
+  unsigned long long m_pending_requests;
 
   fifo_pipeline<dram_req_t> *rwq;
   fifo_pipeline<dram_req_t> *mrqq;

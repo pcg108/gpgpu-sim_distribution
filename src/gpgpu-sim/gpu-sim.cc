@@ -1144,6 +1144,7 @@ gpgpu_sim::gpgpu_sim(const gpgpu_sim_config &config, gpgpu_context *ctx)
   gpu_completed_cta = 0;
   m_total_cta_launched = 0;
   gpu_deadlock = false;
+  m_memory_draining = false;
 
   gpu_stall_icnt2mem = 0;
   gpu_stall_mem2icnt = 0;
@@ -1445,13 +1446,52 @@ bool gpgpu_sim::active() {
   if (m_config.gpu_deadlock_detect && gpu_deadlock) return false;
   for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++)
     if (m_cluster[i]->get_not_completed() > 0) return true;
-  ;
-  for (unsigned i = 0; i < m_memory_config->m_n_mem; i++)
-    if (m_memory_partition_unit[i]->busy() > 0) return true;
-  ;
-  if (icnt_busy()) return true;
+  if (has_pending_memory()) return true;
   if (get_more_cta_left()) return true;
   return false;
+}
+
+bool gpgpu_sim::has_pending_memory() const {
+  for (unsigned i = 0; i < m_shader_config->n_simt_clusters; ++i)
+    if (m_cluster[i]->has_pending_memory()) return true;
+  for (unsigned i = 0; i < m_memory_config->m_n_mem; ++i)
+    if (m_memory_partition_unit[i]->busy()) return true;
+  return icnt_busy();
+}
+
+void gpgpu_sim::drain_memory(bool kernels_completed) {
+  const unsigned long long finish_cycle = global_cycle();
+  m_memory_draining = true;
+  unsigned long long last_progress_cycle = finish_cycle;
+  unsigned long long last_progress = mem_fetch::memory_progress();
+  while (kernels_completed && has_pending_memory() && active()) {
+    cycle();
+    // Draining retires no instructions. Detect a stalled memory system using
+    // actual request transitions/retirements instead of shader writebacks.
+    const unsigned long long progress = mem_fetch::memory_progress();
+    if (progress != last_progress) {
+      last_progress = progress;
+      last_progress_cycle = global_cycle();
+    } else if (m_config.gpu_deadlock_detect &&
+               global_cycle() - last_progress_cycle >= 50000) {
+      gpu_deadlock = true;
+    }
+    // Report an incomplete drain before the normal deadlock diagnostic aborts.
+    if (m_config.gpu_deadlock_detect && gpu_deadlock) break;
+  }
+  const unsigned long long end_cycle = global_cycle();
+  const bool complete = kernels_completed && !has_pending_memory() &&
+                        !(m_config.gpu_deadlock_detect && gpu_deadlock);
+  printf("L2_TRAFFIC_FINAL_DRAIN {\"finish_cycle\":%llu,\"end_cycle\":%llu,"
+         "\"drain_cycles\":%llu,\"complete\":%s,"
+         "\"lrc_incoming_sectors\":%llu,\"lrc_outgoing_sectors\":%llu}\n",
+         finish_cycle, end_cycle, end_cycle - finish_cycle,
+         complete ? "true" : "false",
+         (unsigned long long)m_memory_stats->LRC_subpartition_num_icnt_to_lrc_sectors.sum().value(),
+         (unsigned long long)m_memory_stats->LRC_subpartition_num_lrc_to_l2_sectors.sum().value());
+  fflush(stdout);
+  m_memory_draining = false;
+  deadlock_check();
 }
 
 bool sst_gpgpu_sim::active() {
@@ -1469,7 +1509,8 @@ bool sst_gpgpu_sim::active() {
     return false;
   if (m_config.gpu_deadlock_detect && gpu_deadlock) return false;
   for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++)
-    if (m_cluster[i]->get_not_completed() > 0) return true;
+    if (m_cluster[i]->get_not_completed() > 0 ||
+        m_cluster[i]->has_pending_memory()) return true;
   if (get_more_cta_left()) return true;
   return false;
 }
@@ -2427,7 +2468,8 @@ void gpgpu_sim::cycle() {
     // L1 cache + shader core pipeline stages
     m_power_stats->pwr_mem_stat->core_cache_stats[CURRENT_STAT_IDX].clear();
     for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {
-      if (m_cluster[i]->get_not_completed() || get_more_cta_left()) {
+      if (m_cluster[i]->get_not_completed() || get_more_cta_left() ||
+          m_cluster[i]->has_pending_memory()) {
         m_cluster[i]->core_cycle();
         *active_sms += m_cluster[i]->get_n_active_sms();
       }
@@ -2472,13 +2514,15 @@ void gpgpu_sim::cycle() {
     }
 #endif
 
-    issue_block2core();
-    decrement_kernel_latency();
+    if (!m_memory_draining) {
+      issue_block2core();
+      decrement_kernel_latency();
+    }
 
     // Depending on configuration, invalidate the caches once all of threads are
     // completed.
     int all_threads_complete = 1;
-    if (m_config.gpgpu_flush_l1_cache) {
+    if (!m_memory_draining && m_config.gpgpu_flush_l1_cache) {
       for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {
         if (m_cluster[i]->get_not_completed() == 0)
           m_cluster[i]->cache_invalidate();
@@ -2487,7 +2531,7 @@ void gpgpu_sim::cycle() {
       }
     }
 
-    if (m_config.gpgpu_flush_l2_cache) {
+    if (!m_memory_draining && m_config.gpgpu_flush_l2_cache) {
       if (!m_config.gpgpu_flush_l1_cache) {
         for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {
           if (m_cluster[i]->get_not_completed() != 0) {
@@ -2566,7 +2610,7 @@ void gpgpu_sim::cycle() {
       perf_counters.print_counters();
     }
 
-    if (!(gpu_sim_cycle % 50000)) {
+    if (!m_memory_draining && !(gpu_sim_cycle % 50000)) {
       // deadlock detection
       if (m_config.gpu_deadlock_detect && gpu_sim_insn == last_gpu_sim_insn) {
         gpu_deadlock = true;
@@ -2579,7 +2623,8 @@ void gpgpu_sim::cycle() {
 
 #if (CUDART_VERSION >= 5000)
     // launch device kernel
-    gpgpu_ctx->device_runtime->launch_one_device_kernel();
+    if (!m_memory_draining)
+      gpgpu_ctx->device_runtime->launch_one_device_kernel();
 #endif
   }
 }
@@ -2698,15 +2743,24 @@ void gpgpu_sim::handle_lrc_reply(unsigned subpartition_id, mem_fetch *mf,
 
   // This entry should always be non empty
   assert(entry.size() > 0 && "LRC entry is empty");
+  // Timing rows were emitted at local service completion for the whole group.
+  // Reply retries must never dereference already transferred members for timing.
+  // Membership is closed once service completes. Snapshot output before any
+  // reply can transfer ownership; retries must not emit the entry twice.
+  finalize_lrc_trace(entry.trace);
 
   // Now we implement multicast to send coalesced mf back to
   // each originator by iterating the merged vector
   // We also filter out already sent replies and set reply_sent
   // to true for each mf that is successfully sent
   bool all_success = true;
-  for (auto it = entry.begin(); it != entry.end(); it++) {
-    mem_fetch *merged_mf = it->first;
-    bool &reply_sent = it->second;
+  // Keep the representative alive in the L2 reply queue until every other
+  // contributor has transferred. A consumer may retire an earlier reply
+  // before a later multicast retry, so the queue's lookup key must be last.
+  for (size_t sent_index = 0; sent_index < entry.size(); ++sent_index) {
+    auto &member = entry[(sent_index + 1) % entry.size()];
+    mem_fetch *merged_mf = member.first;
+    bool &reply_sent = member.second;
 
     // If reply is already sent, skip this mf
     if (reply_sent) {
@@ -2718,7 +2772,6 @@ void gpgpu_sim::handle_lrc_reply(unsigned subpartition_id, mem_fetch *mf,
         handle_mf_reply(subpartition_id, merged_mf, parallel_reply_count);
 
     if (success) {
-      log_l2_to_icnt_timing(merged_mf, mf, this);
       // Set reply_sent to true for this mf
       reply_sent = true;
     } else {
@@ -2732,7 +2785,7 @@ void gpgpu_sim::handle_lrc_reply(unsigned subpartition_id, mem_fetch *mf,
   // If we are all done with sending mf back, we should
   // remove the LRC entry from the queue and pop the base_mf
   // note that we don't send the base_mf back to ICNT as it
-  // is the first one in the list and was already sent back
+  // is the first one in the list and was sent back last
   // at this time
   // If we are not done, emulated multicast will happen the
   // next cycle if ICNT buffer is not full
@@ -2786,7 +2839,8 @@ void sst_gpgpu_sim::SST_cycle() {
   // L1 cache + shader core pipeline stages
   m_power_stats->pwr_mem_stat->core_cache_stats[CURRENT_STAT_IDX].clear();
   for (unsigned i = 0; i < m_shader_config->n_simt_clusters; i++) {
-    if (m_cluster[i]->get_not_completed() || get_more_cta_left()) {
+    if (m_cluster[i]->get_not_completed() || get_more_cta_left() ||
+          m_cluster[i]->has_pending_memory()) {
       m_cluster[i]->core_cycle();
       *active_sms += m_cluster[i]->get_n_active_sms();
     }

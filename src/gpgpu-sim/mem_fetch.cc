@@ -34,6 +34,7 @@
 #include "visualizer.h"
 
 unsigned mem_fetch::sm_next_mf_request_uid = 1;
+unsigned long long mem_fetch::sm_memory_progress = 0;
 std::vector<void *> mem_fetch::s_free_list;
 
 void mem_fetch::initialize_trace_metadata(const warp_inst_t *inst,
@@ -88,6 +89,11 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
 
 {
   m_request_uid = sm_next_mf_request_uid++;
+  ++sm_memory_progress;
+  m_l2_source = m_original_mf ? m_original_mf->m_l2_source : L2_SOURCE_UNKNOWN;
+  m_l2_source_request_uid =
+      m_original_mf ? m_original_mf->m_l2_source_request_uid : UINT_MAX;
+  m_l2_source_cycle = m_original_mf ? m_original_mf->m_l2_source_cycle : 0;
   m_access = access;
   if (inst) {
     m_inst = std::make_shared<warp_inst_t>(*inst);
@@ -132,6 +138,7 @@ mem_fetch::mem_fetch(const mem_access_t &access, const warp_inst_t *inst,
   m_l2_fill_complete_cycle = 0;
   m_l2_memport_push_cycle_valid = false;
   m_l2_fill_complete_cycle_valid = false;
+  m_l2_timing_logged = false;
   m_status = MEM_FETCH_INITIALIZED;
   m_status_change = cycle;
   m_mem_config = config;
@@ -153,6 +160,11 @@ mem_fetch::mem_fetch(const mem_access_t &access,
     : m_access(access),
       m_inst(inst_ptr ? inst_ptr : std::make_shared<warp_inst_t>()) {
   m_request_uid = sm_next_mf_request_uid++;
+  ++sm_memory_progress;
+  m_l2_source = m_original_mf ? m_original_mf->m_l2_source : L2_SOURCE_UNKNOWN;
+  m_l2_source_request_uid =
+      m_original_mf ? m_original_mf->m_l2_source_request_uid : UINT_MAX;
+  m_l2_source_cycle = m_original_mf ? m_original_mf->m_l2_source_cycle : 0;
   m_access = access;
   if (inst_ptr) {
     assert(wid == m_inst->warp_id());
@@ -192,6 +204,7 @@ mem_fetch::mem_fetch(const mem_access_t &access,
   m_l2_fill_complete_cycle = 0;
   m_l2_memport_push_cycle_valid = false;
   m_l2_fill_complete_cycle_valid = false;
+  m_l2_timing_logged = false;
   m_status = MEM_FETCH_INITIALIZED;
   m_status_change = cycle;
   m_mem_config = config;
@@ -204,7 +217,10 @@ mem_fetch::mem_fetch(const mem_access_t &access,
   }
 }
 
-mem_fetch::~mem_fetch() { m_status = MEM_FETCH_DELETED; }
+mem_fetch::~mem_fetch() {
+  ++sm_memory_progress;
+  m_status = MEM_FETCH_DELETED;
+}
 
 #define MF_TUP_BEGIN(X) static const char *Status_str[] = {
 #define MF_TUP(X) #X
@@ -236,6 +252,7 @@ void mem_fetch::print(FILE *fp, bool print_inst) const {
 
 void mem_fetch::set_status(enum mem_fetch_status status,
                            unsigned long long cycle) {
+  if (m_status != status) ++sm_memory_progress;
   m_status = status;
   m_status_change = cycle;
 }

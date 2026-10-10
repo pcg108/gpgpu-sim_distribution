@@ -9,6 +9,7 @@ list(APPEND gpgpusim_SRC addrdec.cc
     histogram.cc
     icnt_wrapper.cc
     l2cache.cc
+    l2_traffic_trace.cc
     local_interconnect.cc
     mem_fetch.cc
     mem_latency_stat.cc
@@ -33,4 +34,3 @@ if(GPGPUSIM_USE_POWER_MODEL)
 target_compile_definitions(gpgpusim PRIVATE GPGPUSIM_POWER_MODEL)
 target_include_directories(gpgpusim PRIVATE ${GPGPUSIM_POWER_MODEL})
 endif()
-

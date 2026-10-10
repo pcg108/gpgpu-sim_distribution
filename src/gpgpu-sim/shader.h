@@ -1803,6 +1803,7 @@ class ldst_unit : public pipelined_simd_unit {
 
   // accessors
   virtual unsigned clock_multiplier() const;
+  bool has_pending_memory() const;
 
   virtual bool can_issue(const warp_inst_t &inst) const {
     switch (inst.op) {
@@ -2739,6 +2740,7 @@ class shader_core_ctx : public core_t {
   // used by simt_core_cluster:
   // modifiers
   void cycle();
+  bool has_pending_memory() const;
   void reinit(unsigned start_thread, unsigned end_thread,
               bool reset_not_completed);
   void issue_block2core(class kernel_info_t &kernel);
@@ -3317,6 +3319,7 @@ class simt_core_cluster {
                     memory_stats_t *mstats);
 
   void core_cycle();
+  bool has_pending_memory() const;
   void icnt_cycle();
 
   void reinit();

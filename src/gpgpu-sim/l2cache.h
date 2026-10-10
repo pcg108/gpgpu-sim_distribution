@@ -44,9 +44,12 @@
 #include "dram.h"
 #include "gpu-cache.h"
 #include "mem_latency_stat.h"
+#include "l2_traffic_trace.h"
 
 // std::pair<mem_fetch *, bool>: mf, reply_sent
-typedef std::vector<std::pair<mem_fetch *, bool>> LRCEntry;
+struct LRCEntry : public std::vector<std::pair<mem_fetch *, bool>> {
+  lrc_trace_record trace;
+};
 class mem_fetch;
 class gpgpu_sim;
 class L2RequestCoalescer;
@@ -362,6 +365,7 @@ class memory_sub_partition {
   class mem_fetch *pop();
   class mem_fetch *top();
   void set_done(mem_fetch *mf);
+  void complete_l2_service(mem_fetch *mf, unsigned long long completion_cycle);
 
   unsigned flushL2();
   unsigned invalidateL2();
@@ -491,7 +495,8 @@ class L2RequestCoalescer {
   // Either in a new entry or merge with existing entry
   // Return true if a new entry is allocated, false if merged with existing
   // entry
-  bool insert(new_addr_type sector_addr, mem_fetch *mf);
+  bool insert(new_addr_type sector_addr, mem_fetch *mf,
+              const memory_config *config, unsigned long long cycle);
 
   // Check if there is still space left in the queue
   bool full() { return m_lrc_queue.size() >= m_max_entries; }

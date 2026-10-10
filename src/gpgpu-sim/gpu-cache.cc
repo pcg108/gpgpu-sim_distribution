@@ -1330,6 +1330,9 @@ void baseline_cache::cycle() {
       if (m_level == L1_GPU_CACHE) {
         mf->set_l2_memport_push_cycle(m_gpu->gpu_tot_sim_cycle +
                                       m_gpu->gpu_sim_cycle);
+        mf->set_l2_source(mf->get_is_write() ? L2_SOURCE_L1_WRITE
+                                            : L2_SOURCE_L1_READ,
+                          m_gpu->gpu_tot_sim_cycle + m_gpu->gpu_sim_cycle);
         log_l1_to_l2_request(mf);
       }
       m_memport->push(mf);
