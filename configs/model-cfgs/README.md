@@ -30,7 +30,9 @@ The `fix/hopper-cluster-barriers` branch implements Hopper `UCGABAR_ARV`
 and `UCGABAR_WAIT` as split-phase cluster synchronization. State is tracked
 per kernel, CUDA cluster and generation. Arrival orders preceding synchronous
 memory operations, including mbarrier initialization; WAIT holds the warp until
-all live participants have arrived. TMA and LDGSTS completion still use their
+all live participants have arrived. The state follows NVIDIA's
+[cluster barrier semantics](https://docs.nvidia.com/cuda/archive/12.1.1/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-barrier-cluster).
+TMA, LDGSTS and GMMA completion still use their
 separate asynchronous synchronization mechanisms. This uses the existing cache
 model and does not add global cache coherence: `CCTL.IVALL` still does not
 invalidate L1, so timing for a peer store followed by a cached load retains
@@ -80,3 +82,38 @@ Current verification artifacts, commands and source hashes are collected under
 `/results/mobile-traffic-20261007/completion-timing-v2/experiments/cluster-barriers-20261010-012835/`.
 Per-case reports distinguish successful replays from any remaining simulation
 failures; the historical collections are preserved.
+
+### Verified results (2026-10-10)
+
+Full Gemma kernel 8039 passes on the unchanged mobile Hopper model, H100 and
+H200 without the temporary STAS-deferral guard. Every configuration completes
+all 48 CTAs and 19,840,968 instructions, with 576 arrivals, 576 waits and 576
+releases across 12 cluster generations. All 36 remote STAS completions follow
+their destination mbarrier initialization. Strict validation finds exactly
+504,000 ingress transports and 504,000 timing records per configuration.
+Logging-on/off architectural statistics and final-drain reports match.
+
+| Configuration | Kernel finish cycle | Additional drain cycles | Drain end cycle |
+| --- | ---: | ---: | ---: |
+| Mobile Hopper, 8 SMs | 411,320 | 0 | 411,320 |
+| H100 | 13,383 | 95 | 13,478 |
+| H200 | 12,239 | 78 | 12,317 |
+
+The original mobile failure is now ordered: CTA 31 initializes barrier
+`0x03000508` at cycle 237,637; CTA 28 warp 3 leaves its cluster wait at 237,652;
+the remote STAS completes at 238,237. The event witness is preserved with the
+mobile 8039 result.
+
+The Ampere ResNet kernel 26 control retains its baseline architectural
+statistics and covers all 131,584 bypass loads and 100,352 L1 stores. Focused
+verification passes 56 text/tracez runtime replays, 21 parser tests covering
+65 format cases, 12 sanitized state tests, nine audit-validator tests, and the
+existing completion-logging regression suites.
+
+Mobile Hopper kernels 6542, 9870 and 13076 still deadlock after their initial
+96 arrivals, waits and releases complete. Their unfinished-thread vectors
+match the original runs, with no participant left waiting on the cluster
+barrier. The exact later mbarrier/TMA stall remains unresolved; these failed
+runs have no timing-completeness claim. See the experiment's
+`remaining-tma-deadlocks.json` for evidence and `summary.json` for the complete
+acceptance report. Existing collections and production binaries are unchanged.
