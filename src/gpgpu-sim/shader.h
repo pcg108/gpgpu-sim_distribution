@@ -115,6 +115,9 @@ class shd_warp_t {
  public:
   shd_warp_t(class shader_core_ctx *shader, unsigned warp_size)
       : m_shader(shader), m_warp_size(warp_size) {
+    m_cluster_bound = false;
+    m_cluster_store_acks = 0;
+    m_cluster_exited_lanes = 0;
     m_stores_outstanding = 0;
     m_tma_loads_outstanding = 0;
     m_inst_in_pipeline = 0;
@@ -124,6 +127,9 @@ class shd_warp_t {
     assert(m_stores_outstanding == 0);
     assert(m_tma_loads_outstanding == 0);
     assert(m_inst_in_pipeline == 0);
+    assert(!cluster_sync_pending());
+    m_cluster_bound = false;
+    m_cluster_exited_lanes = 0;
     m_imiss_pending = false;
     m_warp_id = (unsigned)-1;
     m_dynamic_warp_id = (unsigned)-1;
@@ -176,6 +182,9 @@ class shd_warp_t {
   void init(address_type start_pc, unsigned cta_id, unsigned wid,
             const std::bitset<MAX_WARP_SIZE> &active, unsigned dynamic_warp_id,
             unsigned long long streamID) {
+    assert(!cluster_sync_pending());
+    m_cluster_bound = false;
+    m_cluster_exited_lanes = 0;
     m_streamID = streamID;
     m_cta_id = cta_id;
     m_warp_id = wid;
@@ -226,6 +235,23 @@ class shd_warp_t {
     m_gmma_commited_groups.clear();
   }
 
+  // Cluster release ordering is independent of destination-register tracking.
+  bool cluster_barrier_waiting() const;
+  bool cluster_sync_pending() const {
+    return !m_cluster_sync_insts.empty() || !m_cluster_sync_loads.empty() ||
+           m_cluster_store_acks != 0;
+  }
+  void cluster_sync_issue(const warp_inst_t &inst);
+  void cluster_sync_load_begin(const warp_inst_t &inst);
+  void cluster_sync_load_complete(const warp_inst_t &inst, unsigned count = 1);
+  void cluster_sync_retire(const warp_inst_t &inst);
+  void cluster_sync_store_issue(bool is_tma) {
+    if (m_cluster_bound && !is_tma) ++m_cluster_store_acks;
+  }
+  void cluster_sync_store_ack(const warp_inst_t &inst);
+  void cluster_exit(uint32_t mask);
+  unsigned cluster_local_warp() const { return m_cluster_local_warp; }
+
   bool functional_done() const;
   bool waiting();  // not const due to membar
   bool hardware_done() const;
@@ -242,6 +268,7 @@ class shd_warp_t {
   unsigned get_n_completed() const { return n_completed; }
   void set_completed(unsigned lane) {
     assert(m_active_threads.test(lane));
+    cluster_exit(uint32_t(1) << lane);
     m_active_threads.reset(lane);
     n_completed++;
   }
@@ -463,6 +490,14 @@ class shd_warp_t {
                      // this warp
 
   unsigned long long m_last_fetch;
+
+  bool m_cluster_bound;
+  dim3 m_cluster_id, m_cluster_cta;
+  unsigned m_cluster_local_warp;
+  uint32_t m_cluster_exited_lanes;
+  std::set<unsigned long long> m_cluster_sync_insts;
+  std::map<unsigned long long, unsigned> m_cluster_sync_loads;
+  unsigned m_cluster_store_acks;
 
   unsigned m_stores_outstanding;  // number of store requests sent but not yet
                                   // acknowledged
@@ -2803,7 +2838,17 @@ class shader_core_ctx : public core_t {
   // modifiers
   void mem_instruction_stats(const warp_inst_t &inst);
   void decrement_atomic_count(unsigned wid, unsigned n);
-  void inc_store_req(unsigned warp_id) { m_warp[warp_id]->inc_store_req(); }
+  bool check_cluster_barrier_ready(const warp_inst_t *inst, unsigned warp_id);
+  void cluster_sync_load_begin(const warp_inst_t &inst) {
+    m_warp[inst.warp_id()]->cluster_sync_load_begin(inst);
+  }
+  void cluster_sync_load_complete(const warp_inst_t &inst, unsigned count = 1) {
+    m_warp[inst.warp_id()]->cluster_sync_load_complete(inst, count);
+  }
+  void inc_store_req(unsigned warp_id, bool is_tma = false) {
+    m_warp[warp_id]->inc_store_req();
+    m_warp[warp_id]->cluster_sync_store_issue(is_tma);
+  }
   void inc_tma_load_req(unsigned warp_id) {
     m_warp[warp_id]->inc_tma_load_req();
   }

@@ -59,6 +59,12 @@
 #define MAX(a, b) (((a) > (b)) ? (a) : (b))
 #define MIN(a, b) (((a) < (b)) ? (a) : (b))
 
+static bool cluster_trace_enabled() {
+  static const bool enabled = std::getenv("CLUSTER_BARRIER_TRACE") &&
+      strcmp(std::getenv("CLUSTER_BARRIER_TRACE"), "1") == 0;
+  return enabled;
+}
+
 static bool log_cache_traces_enabled() {
   static const bool enabled = std::getenv("LOG_CACHE_TRACES") != NULL;
   return enabled;
@@ -1252,6 +1258,23 @@ void shader_core_ctx::issue_warp(register_set &pipe_reg_set,
   m_stats->shader_cycle_distro[2 + (*pipe_reg)->active_count()]++;
   schedulers[sch_id]->log_issue_cycle((*pipe_reg)->active_count());
   func_exec_inst(**pipe_reg);
+  m_warp[warp_id]->cluster_sync_issue(**pipe_reg);
+  auto *cluster_kernel = m_warp[warp_id]->get_kernel_info();
+  if ((*pipe_reg)->active_count() && cluster_kernel &&
+      cluster_kernel->cluster_barriers().enabled()) {
+    auto &barrier = cluster_kernel->cluster_barriers();
+    auto &inst = **pipe_reg;
+    const unsigned local_warp = m_warp[warp_id]->cluster_local_warp();
+    const uint32_t mask = inst.get_active_mask().to_ulong();
+    if (inst.is_cluster_arrive())
+      barrier.arrive(inst.get_cuda_cluster_id(), inst.get_cuda_cta_id(),
+                     local_warp, mask, m_gpu->global_cycle(), inst.pc);
+    else if (inst.is_cluster_wait())
+      barrier.wait(inst.get_cuda_cluster_id(), inst.get_cuda_cta_id(),
+                   local_warp, mask, m_gpu->global_cycle(), inst.pc);
+    else if (inst.op == EXIT_OPS)
+      m_warp[warp_id]->cluster_exit(mask);
+  }
 
   // Add LDGSTS instructions into a buffer
   unsigned int ldgdepbar_id = m_warp[warp_id]->m_ldgdepbar_id;
@@ -1742,6 +1765,7 @@ void scheduler_unit::cycle() {
                 m_shader->get_active_mask(warp_id, pI);
 
             assert(warp(warp_id).inst_in_pipeline());
+            if (!m_shader->check_cluster_barrier_ready(pI, warp_id)) break;
 
             if ((pI->op == LOAD_OP) || (pI->op == STORE_OP) ||
                 (pI->op == MEMORY_BARRIER_OP) ||
@@ -2362,6 +2386,7 @@ void shader_core_ctx::unset_depbar(const warp_inst_t &inst) {
 }
 
 void shader_core_ctx::warp_inst_complete(const warp_inst_t &inst) {
+  m_warp[inst.warp_id()]->cluster_sync_retire(inst);
 #if 0
       printf("[warp_inst_complete] uid=%u core=%u warp=%u pc=%#x @ time=%llu \n",
              inst.get_uid(), m_sid, inst.warp_id(), inst.pc,  m_gpu->gpu_tot_sim_cycle +  m_gpu->gpu_sim_cycle);
@@ -2469,12 +2494,13 @@ mem_stage_stall_type ldst_unit::process_cache_access(
                            : 1;
 
     for (unsigned i = 0; i < inc_ack; ++i)
-      m_core->inc_store_req(inst.warp_id());
+      m_core->inc_store_req(inst.warp_id(), inst.is_tma_store());
   }
   if (status == HIT) {
     assert(!read_sent);
     inst.accessq_pop_back();
     if (inst.is_load()) {
+      m_core->cluster_sync_load_complete(inst);
       for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++)
         if (inst.out[r] > 0) m_pending_writes[inst.warp_id()][inst.out[r]]--;
 
@@ -2558,7 +2584,7 @@ mem_stage_stall_type ldst_unit::process_memory_access_queue_l1cache(
                   : 1;
 
           for (unsigned i = 0; i < inc_ack; ++i)
-            m_core->inc_store_req(inst.warp_id());
+            m_core->inc_store_req(inst.warp_id(), inst.is_tma_store());
         }
 
         inst.accessq_pop_back();
@@ -2613,6 +2639,7 @@ void ldst_unit::L1_latency_queue_cycle() {
         assert(!read_sent);
         l1_latency_queue[j][0] = NULL;
         if (mf_next->get_inst().is_load()) {
+          m_core->cluster_sync_load_complete(mf_next->get_inst());
           for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++)
             if (mf_next->get_inst().out[r] > 0) {
               assert(m_pending_writes[mf_next->get_inst().warp_id()]
@@ -2706,6 +2733,7 @@ bool ldst_unit::constant_cycle(warp_inst_t &inst, mem_stage_stall_type &rc_fail,
   if (m_config->perfect_inst_const_cache) {
     fail = NO_RC_FAIL;
     unsigned access_count = inst.accessq_count();
+    if (inst.is_load()) m_core->cluster_sync_load_complete(inst, access_count);
     while (inst.accessq_count() > 0) inst.accessq_pop_back();
     if (inst.is_load()) {
       for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++)
@@ -2816,7 +2844,7 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
               assert(m_pending_writes[inst.warp_id()][inst.out[r]] > 0);
           if (access.is_tma()) m_core->inc_tma_load_req(inst.warp_id());
         } else if (inst.is_store())
-          m_core->inc_store_req(inst.warp_id());
+          m_core->inc_store_req(inst.warp_id(), inst.is_tma_store());
       }
     }
   } else {
@@ -3179,6 +3207,7 @@ void ldst_unit::issue(register_set &reg_set) {
   // record how many pending register writes/memory accesses there are for this
   // instruction
   assert(inst->empty() == false);
+  m_core->cluster_sync_load_begin(*inst);
   if (inst->is_load() && inst->space.get_type() != shared_space) {
     unsigned warp_id = inst->warp_id();
     unsigned n_accesses = inst->accessq_count();
@@ -3221,6 +3250,7 @@ void ldst_unit::issue(register_set &reg_set) {
 }
 
 bool ldst_unit::writeback_complete(warp_inst_t &inst) {
+  if (inst.is_load()) m_core->cluster_sync_load_complete(inst);
   bool insn_completed = false;
   for (unsigned r = 0; r < MAX_OUTPUT_VALUES; r++) {
     if (inst.out[r] > 0) {
@@ -3957,6 +3987,13 @@ void ldst_unit::cycle() {
             if (mbar_addr != 0) {
               mbarrier_complete_tx(cuda_cluster_cta_identifier, cuda_cta_ids,
                                    mbar_addr, pipe_reg.data_size, false, 0);
+              if (cluster_trace_enabled())
+                fprintf(stderr, "CLUSTER_MEMORY {\"event\":\"stas_complete\",\"kernel_uid\":%u,\"cycle\":%llu,\"cluster\":[%u,%u,%u],\"cta\":[%u,%u,%u],\"bar_addr\":%u}\n",
+                        m_core->get_kernel_info()->get_uid(), (unsigned long long)m_gpu->global_cycle(),
+                        cuda_cluster_cta_identifier.cluster_id.x,
+                        cuda_cluster_cta_identifier.cluster_id.y,
+                        cuda_cluster_cta_identifier.cluster_id.z,
+                        cuda_cta_ids.x, cuda_cta_ids.y, cuda_cta_ids.z, mbar_addr);
             }
           }
         }
@@ -4001,6 +4038,12 @@ void ldst_unit::mbarrier_init(ClusterCTAIdentifier cluster_cta_identifier,
   ClusterMbarriersLookupTable &mbarrier_table =
       get_mbarrier_table(cluster_cta_identifier.cluster_id);
   mbarrier_table.insert_mbarrier(std::move(mbarrier));
+  if (cluster_trace_enabled())
+    fprintf(stderr, "CLUSTER_MEMORY {\"event\":\"init\",\"kernel_uid\":%u,\"cycle\":%llu,\"cluster\":[%u,%u,%u],\"cta\":[%u,%u,%u],\"bar_addr\":%u}\n",
+            m_core->get_kernel_info()->get_uid(), (unsigned long long)m_gpu->global_cycle(),
+            cluster_cta_identifier.cluster_id.x, cluster_cta_identifier.cluster_id.y,
+            cluster_cta_identifier.cluster_id.z, cuda_cta_ids.x, cuda_cta_ids.y,
+            cuda_cta_ids.z, bar_addr);
 }
 
 void ldst_unit::mbarrier_invalidate(ClusterCTAIdentifier cluster_cta_identifier,
@@ -5244,6 +5287,7 @@ void shader_core_ctx::store_ack(class mem_fetch *mf) {
   unsigned warp_id = mf->get_wid();
   // Decrement the number of outstanding store requests
   m_warp[warp_id]->dec_store_req();
+  m_warp[warp_id]->cluster_sync_store_ack(mf->get_inst());
   // Decrement the number of outstanding TMA stores
   if (mf->get_inst().is_tma_store()) {
     DPRINTF(CORE_ISSUE,
@@ -5294,6 +5338,7 @@ bool shd_warp_t::functional_done() const {
 
 bool shd_warp_t::hardware_done() const {
   return functional_done() && stores_done() && tma_loads_done() &&
+         !cluster_barrier_waiting() && !cluster_sync_pending() &&
          !inst_in_pipeline();
 }
 
@@ -5301,6 +5346,7 @@ bool shd_warp_t::waiting() {
   bool waiting = false;
   // waiting to be initialized with a kernel
   waiting |= functional_done();
+  waiting |= cluster_barrier_waiting();
   // waiting for other warps in CTA to reach barrier
   waiting |= m_shader->warp_waiting_at_barrier(m_warp_id);
   // waiting for memory barrier
@@ -6252,4 +6298,102 @@ void opndcoll_simple_t::dump(FILE *fp) const {
 void opndcoll_simple_t::add_port(port_vector_t &input, port_vector_t &output,
                                  uint_vector_t cu_sets) {
   m_in_ports.push_back(input_port_t(input, output, cu_sets));
+}
+
+// UCGABAR release ordering and stable CUDA cluster participation.
+bool shader_core_ctx::check_cluster_barrier_ready(const warp_inst_t *inst,
+                                                 unsigned warp_id) {
+  auto *kernel = m_warp[warp_id]->get_kernel_info();
+  if (!kernel || !kernel->cluster_barriers().enabled() ||
+      !get_active_mask(warp_id, inst).any()) return true;
+  if (inst->is_cluster_arrive() || inst->op == EXIT_OPS) {
+    if (m_warp[warp_id]->cluster_sync_pending()) return false;
+  }
+  if (!inst->is_cluster_arrive()) return true;
+  const unsigned warps_per_cta =
+      (kernel->threads_per_cta() + m_config->warp_size - 1) / m_config->warp_size;
+  const unsigned local_warp = warp_id - m_warp[warp_id]->get_cta_id() * warps_per_cta;
+  return kernel->cluster_barriers().arrive_ready(
+      inst->get_cuda_cluster_id(), inst->get_cuda_cta_id(), local_warp);
+}
+
+static bool cluster_synchronous_memory(const warp_inst_t &inst) {
+  if (inst.m_is_ldgsts || inst.is_tma_load() || inst.is_tma_store() ||
+      inst.is_arrives() || inst.is_gmma()) return false;
+  return inst.is_load() || inst.is_store() || inst.is_syncs() ||
+         inst.is_fence() || inst.op == STAS_OP || inst.op == MEMORY_BARRIER_OP;
+}
+
+void shd_warp_t::cluster_sync_issue(const warp_inst_t &inst) {
+  auto *kernel = get_kernel_info();
+  if (!kernel || !kernel->cluster_barriers().enabled()) return;
+  if (!m_cluster_bound) {
+    m_cluster_bound = true;
+    m_cluster_id = inst.get_cuda_cluster_id();
+    m_cluster_cta = inst.get_cuda_cta_id();
+    const unsigned warps = (kernel->threads_per_cta() + m_warp_size - 1) / m_warp_size;
+    m_cluster_local_warp = m_warp_id - m_cta_id * warps;
+    assert(m_cluster_local_warp < warps);
+  }
+  if (!inst.active_count() || !cluster_synchronous_memory(inst)) return;
+  m_cluster_sync_insts.insert(inst.get_uid());
+  if (inst.is_load()) {
+    const unsigned accesses = inst.space.get_type() == shared_space
+                                  ? 1 : inst.accessq_count();
+    if (accesses) m_cluster_sync_loads.emplace(inst.get_uid(), accesses);
+  }
+}
+
+void shd_warp_t::cluster_sync_load_begin(const warp_inst_t &inst) {
+  if (m_cluster_bound && inst.is_load())
+    m_cluster_sync_insts.erase(inst.get_uid());
+}
+
+void shd_warp_t::cluster_sync_load_complete(const warp_inst_t &inst,
+                                          unsigned count) {
+  if (!m_cluster_bound || !inst.active_count() ||
+      !cluster_synchronous_memory(inst) || count == 0) return;
+  auto it = m_cluster_sync_loads.find(inst.get_uid());
+  assert(it != m_cluster_sync_loads.end());
+  assert(it->second >= count);
+  it->second -= count;
+  if (!it->second) {
+    m_cluster_sync_loads.erase(it);
+    if (cluster_trace_enabled())
+      fprintf(stderr, "CLUSTER_MEMORY {\"event\":\"load_complete\",\"kernel_uid\":%u,\"cycle\":%llu,\"cluster\":[%u,%u,%u],\"cta\":[%u,%u,%u],\"warp\":%u,\"pc\":%llu}\n",
+              get_kernel_info()->get_uid(), (unsigned long long)m_shader->get_gpu()->global_cycle(),
+              m_cluster_id.x,m_cluster_id.y,m_cluster_id.z,
+              m_cluster_cta.x,m_cluster_cta.y,m_cluster_cta.z,m_cluster_local_warp,
+              (unsigned long long)inst.pc);
+  }
+}
+
+void shd_warp_t::cluster_sync_retire(const warp_inst_t &inst) {
+  if (m_cluster_bound) m_cluster_sync_insts.erase(inst.get_uid());
+}
+
+bool shd_warp_t::cluster_barrier_waiting() const {
+  return m_cluster_bound && get_kernel_info()->cluster_barriers().waiting(
+      m_cluster_id, m_cluster_cta, m_cluster_local_warp);
+}
+
+void shd_warp_t::cluster_exit(uint32_t mask) {
+  if (!m_cluster_bound) return;
+  mask &= ~m_cluster_exited_lanes;
+  if (!mask) return;
+  get_kernel_info()->cluster_barriers().exit(m_cluster_id, m_cluster_cta,
+      m_cluster_local_warp, mask, m_shader->get_gpu()->global_cycle());
+  m_cluster_exited_lanes |= mask;
+}
+
+void shd_warp_t::cluster_sync_store_ack(const warp_inst_t &inst) {
+  if (!m_cluster_bound || inst.is_tma_store()) return;
+  assert(m_cluster_store_acks);
+  --m_cluster_store_acks;
+  if (cluster_trace_enabled())
+    fprintf(stderr, "CLUSTER_MEMORY {\"event\":\"store_ack\",\"kernel_uid\":%u,\"cycle\":%llu,\"cluster\":[%u,%u,%u],\"cta\":[%u,%u,%u],\"warp\":%u,\"pc\":%llu,\"remaining\":%u}\n",
+            get_kernel_info()->get_uid(), (unsigned long long)m_shader->get_gpu()->global_cycle(),
+            m_cluster_id.x,m_cluster_id.y,m_cluster_id.z,
+            m_cluster_cta.x,m_cluster_cta.y,m_cluster_cta.z,m_cluster_local_warp,
+            (unsigned long long)inst.pc, m_cluster_store_acks);
 }

@@ -46,6 +46,7 @@
 #include <memory>
 #include <unordered_set>
 #include <vector>
+#include "cluster_barrier.h"
 #include "statistics.h"
 #include "utils.h"
 
@@ -520,6 +521,12 @@ struct CUstream_st;
 extern std::map<void *, void **> pinned_memory;
 extern std::map<void *, size_t> pinned_memory_size;
 
+enum cluster_barrier_op {
+  CLUSTER_BARRIER_NONE,
+  CLUSTER_BARRIER_ARRIVE,
+  CLUSTER_BARRIER_WAIT
+};
+
 class kernel_info_t {
  public:
   //   kernel_info_t()
@@ -684,8 +691,16 @@ class kernel_info_t {
   std::unordered_map<dim3, ClusterMbarriersLookupTable, utils::Dim3Hash,
                      utils::Dim3Equal>
       m_cluster_mbarrier_lookup_table;
+  cluster_barrier_manager m_cluster_barriers;
 
  public:
+  cluster_barrier_manager &cluster_barriers() {
+    m_cluster_barriers.set_kernel_uid(m_uid);
+    return m_cluster_barriers;
+  }
+  const cluster_barrier_manager &cluster_barriers() const {
+    return m_cluster_barriers;
+  }
   ClusterMbarriersLookupTable &get_cluster_mbarrier_lookup_table(
       dim3 cluster_id) {
     return m_cluster_mbarrier_lookup_table[cluster_id];
@@ -1324,6 +1339,7 @@ class inst_t {
     isize = 0;
     m_is_proxy_fence = false;
     m_syncs_op = SYNCS_MAX_ENUM_NO_USED;
+    m_cluster_barrier_op = CLUSTER_BARRIER_NONE;
   }
   bool valid() const { return m_decoded; }
   virtual void print_insn(FILE *fp) const {
@@ -1356,6 +1372,15 @@ class inst_t {
   bool is_alu() const { return (sp_op == INT__OP); }
   bool is_fence() const { return (op == FENCE_OP); }
   bool is_syncs() const { return (op == SYNCS_OP); }
+  bool is_cluster_arrive() const {
+    return m_cluster_barrier_op == CLUSTER_BARRIER_ARRIVE;
+  }
+  bool is_cluster_wait() const {
+    return m_cluster_barrier_op == CLUSTER_BARRIER_WAIT;
+  }
+  void set_cluster_barrier_op(cluster_barrier_op op) {
+    m_cluster_barrier_op = op;
+  }
   bool is_shmem_load() const {
     return is_load() && space.get_type() == shared_space;
   }
@@ -1461,6 +1486,7 @@ class inst_t {
   // Weili: syncs unit related, for mbarrier
   // https://docs.nvidia.com/cuda/parallel-thread-execution/#parallel-synchronization-and-communication-instructions-mbarrier
   syncs_op m_syncs_op;
+  cluster_barrier_op m_cluster_barrier_op;
 };
 
 enum divergence_support_t { POST_DOMINATOR = 1, NUM_SIMD_MODEL };

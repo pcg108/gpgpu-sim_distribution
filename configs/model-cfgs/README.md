@@ -14,49 +14,69 @@ For Hopper SASS replay, load the existing H100 trace timing file as well.
 From the framework root:
 
 ```bash
-gpu-simulator/build/logging-release/accel-sim.out \
+gpu-simulator/build/cluster-release/accel-sim.out \
   -config gpu-simulator/gpgpu-sim/configs/model-cfgs/gpgpusim_8sm_hopper.config \
   -config gpu-simulator/configs/tested-cfgs/SM90_H100/trace.config \
-  -trace /path/to/kernelslist.g
+  -trace /path/to/kernelslist.g \
+  -gpgpu_max_concurrent_kernel 1 -gpgpu_concurrent_kernel_sm 0
 ```
 
 The main config's PTX timing options do not replace the SASS timing file.
 No external interconnect configuration file is needed.
 
-## Validation and current limitation
+## Cluster synchronization
 
-The first eight CTAs of Gemma 4 kernel 8039, staged as an eight-CTA grid
-containing two complete CUDA CTA clusters, complete successfully with this
-configuration: 81,327 cycles, 3,308,972 instructions, and eight issued CTAs.
-This checks Hopper TMA, GMMA, and barrier paths in one wave of resident CTAs.
+The `fix/hopper-cluster-barriers` branch implements Hopper `UCGABAR_ARV`
+and `UCGABAR_WAIT` as split-phase cluster synchronization. State is tracked
+per kernel, CUDA cluster and generation. Arrival orders preceding synchronous
+memory operations, including mbarrier initialization; WAIT holds the warp until
+all live participants have arrived. TMA and LDGSTS completion still use their
+separate asynchronous synchronization mechanisms. This uses the existing cache
+model and does not add global cache coherence: `CCTL.IVALL` still does not
+invalidate L1, so timing for a peer store followed by a cached load retains
+that limitation.
 
-The full 48-CTA kernel 8039 replay currently fails in
-`ldst_unit::mbarrier_complete_tx` because a remote `STAS` reaches a peer's
-mbarrier before that peer initializes it. The Hopper opcode table maps
-`UCGABAR_ARV` and `UCGABAR_WAIT` to `OP_NOP`, so the trace's cluster rendezvous
-does not enforce initialization ordering. Individual CTA admission exposes
-this gap when later waves start peer CTAs at different times.
+Cluster replay currently requires `-gpgpu_max_concurrent_kernel 1` and
+`-gpgpu_concurrent_kernel_sm 0`. Before launching an active cluster kernel,
+text, xz and tracez preflight verifies complete CTA/cluster/local-rank metadata,
+dense cluster ranks, contiguous cluster members in trace order, nonempty warp
+traces, and arrival/wait pairing for surviving lanes. Unsupported opcode modifiers
+and divergent masks are rejected; short final warps and previously exited lanes
+are accounted for when checking the remaining live participants.
+The cluster must fit the configuration's total resident CTA capacity, otherwise
+launch fails with a diagnostic. These checks let the existing FIFO CTA scheduler
+make progress across waves. General cluster reordering, concurrent clustered
+kernels and GPC placement are outside this implementation.
 
-An isolated diagnostic replay on 2026-10-10 reproduced the failure at cycle
-243,194: CTA 28, warp 3, PC `0x2a50` completes four bytes against CTA 31's
-barrier `0x03000508`. CTA 31 launched at cycle 242,933 but had not initialized
-that barrier. A diagnostic-only guard that defers STAS completion until all
-active destinations exist released it at cycle 243,325. With that guard, all
-48 CTAs completed in 413,155 cycles (19,840,968 instructions), followed by a
-one-cycle successful final drain. Five STAS instructions required deferral.
-Both diagnostic runs had traffic logging disabled; production binaries and
-collection results were preserved.
+Previously, both instructions were decoded as no-ops. A later-wave CTA in full
+Gemma kernel 8039 could therefore issue remote STAS before a peer initialized its
+mbarrier on the eight-SM model. The isolated
+[historical diagnosis](/results/mobile-traffic-20261007/completion-timing-v2/experiments/8039-mobile-debug-20261010/diagnosis.json)
+records the original assertion and a temporary STAS guard used to establish the
+cause. That guard is not part of the implementation.
 
-The trace contains no mbarrier invalidations, and expected/completed byte
-counts balance for all 708 transaction-bearing barriers. A proper model
-repair must implement cluster arrival/wait ordering and account for cluster
-admission and multicast destination readiness. The diagnostic guard is not
-that repair, and its timing is not validated production output. The unchanged
-full kernel remains unsupported on this model. Evidence, exact commands,
-binary hashes, and diagnostic patches are retained under
-`/results/mobile-traffic-20261007/completion-timing-v2/experiments/8039-mobile-debug-20261010/`
-(`diagnosis.json`).
+## Isolated verification
 
-Commands, config snapshots, and results are retained under the framework's
-`data/gemma4-h100/runs-mobile-hopper-8sm-single-wave-smoke/` and
-`data/gemma4-h100/runs-mobile-hopper-8sm-config-smoke/` directories.
+Both the framework and nested GPGPU-Sim repository use branch
+`fix/hopper-cluster-barriers` in `/tmp/hopper-cluster-barriers`; the original
+workspace and collection binaries remain separate. The verification runner
+pins its binary, library, configs and validators in each fresh output directory.
+From that worktree, run generated synchronization fixtures with:
+
+```bash
+python3 util/logging-regression/tests/run-cluster-barriers.py \
+  --binary gpu-simulator/build/cluster-release/accel-sim.out \
+  --library-dir gpu-simulator/build/cluster-release/gpgpu-sim \
+  --mode synthetic --output /path/to/new-cluster-fixture-results
+```
+
+Use `--mode captured --cases mobile-hopper:8039` for the full mobile replay, with
+`--hopper-traces /path/to/hopper/traces` when traces are stored elsewhere.
+Captured checks compare logging-on/off execution and require full completion
+timing coverage after memory draining. Parser-only tests are available through
+`python3 util/logging-regression/tests/test_cluster_trace_parser.py -v`.
+
+Current verification artifacts, commands and source hashes are collected under
+`/results/mobile-traffic-20261007/completion-timing-v2/experiments/cluster-barriers-20261010-012835/`.
+Per-case reports distinguish successful replays from any remaining simulation
+failures; the historical collections are preserved.
