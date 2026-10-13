@@ -259,6 +259,11 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
   unsigned valid_line = (unsigned)-1;
   unsigned long long valid_timestamp = (unsigned)-1;
 
+  // Keep a replacement candidate outside the preferred dirty-line quota.
+  // A quota is a preference, not a reservation: if every unreserved way in
+  // this set is protected, waiting cannot guarantee that the quota changes.
+  unsigned protected_line = (unsigned)-1;
+  unsigned long long protected_timestamp = (unsigned long long)-1;
   bool all_reserved = true;
   // check for hit or pending hit
   for (unsigned way = 0; way < m_config.m_assoc; way++) {
@@ -316,8 +321,20 @@ enum cache_request_status tag_array::probe(new_addr_type addr, unsigned &idx,
             }
           }
         }
+      } else {
+        const unsigned long long timestamp =
+            m_config.m_replacement_policy == LRU
+                ? line->get_last_access_time() : line->get_alloc_time();
+        if (protected_line == (unsigned)-1 || timestamp < protected_timestamp) {
+          protected_line = index;
+          protected_timestamp = timestamp;
+        }
       }
     }
+  }
+  if (all_reserved && protected_line != (unsigned)-1) {
+    idx = protected_line;
+    return MISS;
   }
   if (all_reserved) {
     assert(m_config.m_alloc_policy == ON_MISS);
