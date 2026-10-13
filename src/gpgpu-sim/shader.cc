@@ -4120,63 +4120,37 @@ void ldst_unit::mbarrier_complete_tx(
   LDST_DPRINTF(
       "Completing transaction byte count %d on cta id %d %d %d, mbarrier %x\n",
       tx_count, cuda_cta_ids.x, cuda_cta_ids.y, cuda_cta_ids.z, bar_addr);
-  // Complete on local barrier
-  mbarrier_t *mbarrier =
-      get_mbarrier(cluster_cta_identifier.cluster_id, bar_addr);
-  assert(mbarrier != nullptr &&
-         "Receives null mbarrier pointer from get_mbarrier");
-  mbarrier->complete_on(tx_count);
-
-  // Handle multicast
-  if (is_tma_multicast) {
-    ClusterMbarriersLookupTable &mbarrier_table =
-        get_mbarrier_table(cluster_cta_identifier.cluster_id);
-
-    // multicast source mbarrier
-    mbarrier_t *src_mbarrier = mbarrier_table.lookup_clustermbar(bar_addr);
-    assert(src_mbarrier != nullptr &&
+  if (!is_tma_multicast) {
+    mbarrier_t *mbarrier =
+        get_mbarrier(cluster_cta_identifier.cluster_id, bar_addr);
+    assert(mbarrier != nullptr &&
            "Receives null mbarrier pointer from get_mbarrier");
-    dim3 src_cluster_id = cluster_cta_identifier.cluster_id;
-    uint32_t src_rank = cluster_cta_identifier.cluster_rank;
-    uint32_t src_offset = src_mbarrier->get_bar_offset();
-    LDST_DPRINTF(
-        "Handling multicast for cta id %d %d %d, mbarrier %x, mask %x, src "
-        "%s, src offset %d, src mbarrier ptr (%p)\n",
-        cuda_cta_ids.x, cuda_cta_ids.y, cuda_cta_ids.z, bar_addr,
-        tma_multicast_cta_mask,
-        src_mbarrier->get_cluster_cta_identifier().to_string().c_str(),
-        src_offset, src_mbarrier);
+    mbarrier->complete_on(tx_count);
+    return;
+  }
 
-    // Need to find the mbarrier belong in the same cluster and is marked in the
-    // multicast mask We need to do a global search in all shader core as we
-    // don't have cluster fully implemented in gpgpu-sim yet
-    auto [begin_iter, end_iter] =
-        mbarrier_table.lookup_clustermbars_by_offset(src_offset);
-
-    // Complete the transaction byte count if this mbarrier
-    // is marked in the multicast mask
-    for (auto it = begin_iter; it != end_iter; ++it) {
-      mbarrier_t *mbarrier = it->second;
-      uint32_t mbarrier_rank =
-          mbarrier->get_cluster_cta_identifier().cluster_rank;
-
-      // Skip source mbarrier to avoid double completion
-      if (mbarrier_rank == src_rank) {
-        continue;
-      }
-
-      // Check if we need to multicast to this mbarrier
-      bool is_target = (tma_multicast_cta_mask >> mbarrier_rank) & 1;
-      if (is_target) {
-        LDST_DPRINTF(
-            "Completing transaction byte count %d mbarrier %x (ptr: %p), dst "
-            "cluster id %s due to multicast\n",
-            tx_count, mbarrier->get_bar_addr(), mbarrier,
-            mbarrier->get_cluster_cta_identifier().to_string().c_str());
-        mbarrier->complete_on(tx_count);
-      }
+  // Multicast completion goes only to the destination mask, including the
+  // issuing CTA only when its bit is set. No local barrier is required when
+  // the issuer is not a destination. An empty mask has no completion effects.
+  if (tma_multicast_cta_mask == 0) return;
+  ClusterMbarriersLookupTable &mbarrier_table =
+      get_mbarrier_table(cluster_cta_identifier.cluster_id);
+  auto [begin_iter, end_iter] =
+      mbarrier_table.lookup_clustermbars_by_offset(bar_addr & 0xFFFFFF);
+  uint32_t completed_mask = 0;
+  for (auto it = begin_iter; it != end_iter; ++it) {
+    mbarrier_t *mbarrier = it->second;
+    uint32_t rank = mbarrier->get_cluster_cta_identifier().cluster_rank;
+    assert(rank < 32);
+    const uint32_t bit = uint32_t{1} << rank;
+    if (tma_multicast_cta_mask & bit) {
+      assert(!(completed_mask & bit) && "Duplicate multicast destination barrier");
+      mbarrier->complete_on(tx_count);
+      completed_mask |= bit;
     }
   }
+  assert(completed_mask == tma_multicast_cta_mask &&
+         "TMA multicast destination barrier is not initialized");
 }
 
 void shader_core_ctx::register_cta_thread_exit(unsigned cta_num,
