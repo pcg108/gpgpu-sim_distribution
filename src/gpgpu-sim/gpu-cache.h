@@ -1052,6 +1052,7 @@ class mshr_table {
   void mark_ready(new_addr_type block_addr, bool &has_atomic);
   /// Returns true if ready accesses exist
   bool access_ready() const { return !m_current_response.empty(); }
+  bool empty() const { return m_data.empty() && m_current_response.empty(); }
   /// Returns next ready access
   mem_fetch *next_access();
   void display(FILE *fp) const;
@@ -1340,6 +1341,11 @@ class baseline_cache : public cache_t {
   /// Are any (accepted) accesses that had to wait for memory now ready? (does
   /// not include accesses that "HIT")
   bool access_ready() const { return m_mshrs.access_ready(); }
+  // Dirty resident lines are not outstanding traffic and must not force a flush.
+  bool has_pending_memory() const {
+    return !m_miss_queue.empty() || !m_mshrs.empty() ||
+           !m_extra_mf_fields.empty();
+  }
   /// Pop next ready access (does not include accesses that "HIT")
   mem_fetch *next_access() { return m_mshrs.next_access(); }
   // flash invalidate all entries in cache
@@ -1781,6 +1787,10 @@ class tex_cache : public cache_t {
   /// Are any (accepted) accesses that had to wait for memory now ready? (does
   /// not include accesses that "HIT")
   bool access_ready() const { return !m_result_fifo.empty(); }
+  bool has_pending_memory() const {
+    return !m_fragment_fifo.empty() || !m_request_fifo.empty() ||
+           !m_rob.empty() || !m_result_fifo.empty();
+  }
   /// Pop next ready access (includes both accesses that "HIT" and those that
   /// "MISS")
   mem_fetch *next_access() { return m_result_fifo.pop(); }

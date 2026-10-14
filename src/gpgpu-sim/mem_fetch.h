@@ -44,6 +44,19 @@ enum mf_type {
   WRITE_FORWARD,  // write request sent to other chiplet
 };
 
+// Logging provenance for requests leaving a shader's data-memory paths.
+// Sector children retain the original departure identity independently of
+// their functional instruction state and simulator ownership pointers.
+enum l2_traffic_source {
+  L2_SOURCE_UNKNOWN = 0,
+  L2_SOURCE_L1_READ,
+  L2_SOURCE_L1_WRITE,
+  L2_SOURCE_L1_BYPASS_LOAD,
+  L2_SOURCE_L1_BYPASS_STORE,
+  L2_SOURCE_TMA_LOAD,
+  L2_SOURCE_TMA_STORE,
+};
+
 #define MF_TUP_BEGIN(X) enum X {
 #define MF_TUP(X) X
 #define MF_TUP_END(X) \
@@ -90,6 +103,10 @@ class mem_fetch {
             mem_fetch *original_wr_mf = NULL);
   ~mem_fetch();
 
+  // Process-wide simulator progress, independent of logging and instruction
+  // retirement. Repeating a blocked status does not count as forward progress.
+  static unsigned long long memory_progress() { return sm_memory_progress; }
+
   void set_status(enum mem_fetch_status status, unsigned long long cycle);
   void set_reply() {
     assert(m_access.get_type() != L1_WRBK_ACC &&
@@ -130,6 +147,15 @@ class mem_fetch {
   unsigned get_src_chiplet() const { return m_src_chiplet; }
   bool get_is_write() const { return m_access.is_write(); }
   unsigned get_request_uid() const { return m_request_uid; }
+  l2_traffic_source get_l2_source() const { return m_l2_source; }
+  unsigned get_l2_source_request_uid() const { return m_l2_source_request_uid; }
+  unsigned long long get_l2_source_cycle() const { return m_l2_source_cycle; }
+  bool has_l2_source() const { return m_l2_source != L2_SOURCE_UNKNOWN; }
+  void set_l2_source(l2_traffic_source source, unsigned long long cycle) {
+    m_l2_source = source;
+    m_l2_source_request_uid = m_request_uid;
+    m_l2_source_cycle = cycle;
+  }
   unsigned get_sid() const { return m_sid; }
   unsigned get_tpc() const { return m_tpc; }
   unsigned get_wid() const { return m_wid; }
@@ -168,6 +194,8 @@ class mem_fetch {
   bool has_l2_fill_complete_cycle() const {
     return m_l2_fill_complete_cycle_valid;
   }
+  bool l2_timing_logged() const { return m_l2_timing_logged; }
+  void mark_l2_timing_logged() { m_l2_timing_logged = true; }
   unsigned long long get_streamID() const { return m_streamID; }
 
   enum mem_access_type get_access_type() const { return m_access.get_type(); }
@@ -201,8 +229,12 @@ class mem_fetch {
 
  private:
   static std::vector<void *> s_free_list;
+  static unsigned long long sm_memory_progress;
   // request source information
   unsigned m_request_uid;
+  l2_traffic_source m_l2_source;
+  unsigned m_l2_source_request_uid;
+  unsigned long long m_l2_source_cycle;
   unsigned m_sid;
   unsigned m_tpc;
   unsigned m_wid;
@@ -240,6 +272,7 @@ class mem_fetch {
                                                  // becomes ready at L2
   bool m_l2_memport_push_cycle_valid;
   bool m_l2_fill_complete_cycle_valid;
+  bool m_l2_timing_logged;  // per transport; never inherited by a split child
 
   // requesting instruction (shared to avoid deep-copying per mem_fetch)
   std::shared_ptr<warp_inst_t> m_inst;

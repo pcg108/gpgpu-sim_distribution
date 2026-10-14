@@ -135,6 +135,7 @@ dram_t::dram_t(unsigned int partition_id, const memory_config *config,
   n_wr_WB = 0;
   n_rd_L2_A = 0;
   n_req = 0;
+  m_pending_requests = 0;
   max_mrqs_temp = 0;
   bwutil = 0;
   max_mrqs = 0;
@@ -176,6 +177,12 @@ bool dram_t::full(bool is_write) const {
              m_config->gpgpu_frfcfs_dram_sched_queue_size;
   } else
     return mrqq->full();
+}
+
+bool dram_t::busy() const {
+  // rwq contains permanent latency bubbles, so its empty() is not a traffic
+  // predicate. Count accepted requests until their final data transfer.
+  return m_pending_requests != 0 || !returnq->empty();
 }
 
 unsigned dram_t::que_length() const {
@@ -258,6 +265,7 @@ void dram_t::push(class mem_fetch *data) {
 
   // stats...
   n_req += 1;
+  ++m_pending_requests;
   n_req_partial += 1;
   if (m_config->scheduler_type == DRAM_FRFCFS) {
     unsigned nreqs = m_frfcfs_scheduler->num_pending();
@@ -298,6 +306,8 @@ void dram_t::cycle() {
       cmd->dqbytes += m_config->dram_atom_size;
 
       if (cmd->dqbytes >= cmd->nbytes) {
+        assert(m_pending_requests > 0);
+        --m_pending_requests;
         mem_fetch *data = cmd->data;
         data->set_status(IN_PARTITION_MC_RETURNQ,
                          m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle);

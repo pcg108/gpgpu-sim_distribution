@@ -47,6 +47,7 @@
 #include "gpu-misc.h"
 #include "gpu-sim.h"
 #include "icnt_wrapper.h"
+#include "l2_traffic_trace.h"
 #include "mem_fetch.h"
 #include "mem_latency_stat.h"
 #include "stat-tool.h"
@@ -2798,6 +2799,14 @@ bool ldst_unit::memory_cycle(warp_inst_t &inst,
             m_mf_allocator->alloc(inst_ptr, access,
                                   m_core->get_gpu()->gpu_sim_cycle +
                                       m_core->get_gpu()->gpu_tot_sim_cycle);
+        const l2_traffic_source source =
+            access.is_tma()
+                ? (access.is_write() ? L2_SOURCE_TMA_STORE : L2_SOURCE_TMA_LOAD)
+                : (access.is_write() ? L2_SOURCE_L1_BYPASS_STORE
+                                     : L2_SOURCE_L1_BYPASS_LOAD);
+        mf->set_l2_source(source, m_core->get_gpu()->gpu_sim_cycle +
+                                      m_core->get_gpu()->gpu_tot_sim_cycle);
+        log_l2_source_departure(mf, m_memory_config);
         m_icnt->push(mf);
         inst.accessq_pop_back();
         // inst.clear_active( access.get_warp_mask() );
@@ -3639,6 +3648,21 @@ void ldst_unit::writeback() {
   if (serviced_client != (unsigned)-1) {
     m_writeback_arb = (serviced_client + 1) % m_num_writeback_clients;
   }
+}
+
+bool ldst_unit::has_pending_memory() const {
+  if (!m_dispatch_reg->empty() || !m_next_wb.empty() ||
+      !m_response_fifo.empty() || !m_next_global.empty() ||
+      !m_pending_arrives_ldgstsbar.empty())
+    return true;
+  for (unsigned stage = 0; stage < m_pipeline_depth; ++stage)
+    if (!m_pipeline_reg[stage]->empty()) return true;
+  for (const auto &bank : l1_latency_queue)
+    for (const mem_fetch *mf : bank)
+      if (mf) return true;
+  return (m_L1D && m_L1D->has_pending_memory()) ||
+         (m_L1C && m_L1C->has_pending_memory()) ||
+         (m_L1T && m_L1T->has_pending_memory());
 }
 
 unsigned ldst_unit::clock_multiplier() const {
@@ -4792,8 +4816,27 @@ void shader_core_config::set_pipeline_latency() {
   max_tensor_core_latency = tensor_latency;
 }
 
+bool shader_core_ctx::has_pending_memory() const {
+  return m_ldst_unit->has_pending_memory() || m_L1I->has_pending_memory();
+}
+
 void shader_core_ctx::cycle() {
-  if (!isactive() && get_not_completed() == 0) return;
+  if (!isactive() && get_not_completed() == 0) {
+    if (!has_pending_memory()) return;
+    // A completed CTA may leave independently acknowledged eviction writes in
+    // L1's miss queue. Advance only the memory machinery, at its usual rate.
+    for (unsigned c = 0; c < m_ldst_unit->clock_multiplier(); ++c)
+      m_ldst_unit->cycle();
+    for (unsigned c = 0; c < m_config->inst_fetch_throughput; ++c) {
+      m_L1I->cycle();
+      if (m_L1I->access_ready()) {
+        mem_fetch *mf = m_L1I->next_access();
+        m_warp[mf->get_wid()]->clear_imiss_pending();
+        delete mf;
+      }
+    }
+    return;
+  }
 
   m_stats->shader_cycles[m_sid]++;
   writeback();
@@ -5727,6 +5770,13 @@ unsigned simt_core_cluster::max_cta(const kernel_info_t &kernel) {
   return m_config->n_simt_cores_per_cluster * m_config->max_cta(kernel);
 }
 
+bool simt_core_cluster::has_pending_memory() const {
+  if (!m_response_fifo.empty()) return true;
+  for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; ++i)
+    if (m_core[i]->has_pending_memory()) return true;
+  return false;
+}
+
 unsigned simt_core_cluster::get_not_completed() const {
   unsigned not_completed = 0;
   for (unsigned i = 0; i < m_config->n_simt_cores_per_cluster; i++)
@@ -5841,6 +5891,8 @@ bool sst_simt_core_cluster::SST_injection_buffer_full(unsigned size, bool write,
 }
 
 void simt_core_cluster::icnt_inject_request_packet(class mem_fetch *mf) {
+  audit_l2_traffic(mf, "departure",
+                   m_gpu->gpu_sim_cycle + m_gpu->gpu_tot_sim_cycle, false);
   // Update stats based on mf type
   update_icnt_stats(mf);
 

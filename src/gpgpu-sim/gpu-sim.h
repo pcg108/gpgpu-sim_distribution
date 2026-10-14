@@ -616,6 +616,8 @@ class gpgpu_sim : public gpgpu_t {
   void init();
   void cycle();
   bool active();
+  bool has_pending_memory() const;
+  void drain_memory(bool kernels_completed);
   bool cycle_insn_cta_max_hit() {
     return (m_config.gpu_max_cycle_opt && (gpu_tot_sim_cycle + gpu_sim_cycle) >=
                                               m_config.gpu_max_cycle_opt) ||
@@ -768,6 +770,7 @@ class gpgpu_sim : public gpgpu_t {
 
   // debug
   bool gpu_deadlock;
+  bool m_memory_draining;
 
   //// configuration parameters ////
   const gpgpu_sim_config &m_config;
