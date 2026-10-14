@@ -117,3 +117,22 @@ barrier. The exact later mbarrier/TMA stall remains unresolved; these failed
 runs have no timing-completeness claim. See the experiment's
 `remaining-tma-deadlocks.json` for evidence and `summary.json` for the complete
 acceptance report. Existing collections and production binaries are unchanged.
+
+## Integrated GTO collection (2026-10-14)
+
+The `logging-v2` branch includes the completion-timing, cluster synchronization,
+TMA multicast destination-mask, and cache replacement progress fixes. The mobile
+Hopper configuration uses GTO scheduling and enables LRC. The dated verification
+above records earlier isolated runs; its remaining TMA deadlocks have since been
+resolved by preserving captured mbarrier waits and correcting multicast and cache
+replacement behavior.
+
+The complete GTO Hopper Gemma collection has 6,502 successful, fully drained and
+strictly validated kernels out of 6,539. The other 37 kernels are rejected because
+their cluster requires 15 resident CTAs while this configuration provides eight
+for those kernels. Kernels 9870 and 13076 and the ten former empty-mask validation
+failures all pass. Collection provenance, commands, binary/config hashes and
+per-kernel timing validation remain under
+`/results/mobile-traffic-20261007/completion-timing-v2/experiments/hopper-gemma-gto-20261011-011220/`.
+
+The eight-SM Ampere configuration is unchanged by the Hopper scheduler setting.
