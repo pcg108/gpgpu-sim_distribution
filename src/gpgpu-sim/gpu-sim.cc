@@ -873,6 +873,21 @@ void increment_x_then_y_then_z(dim3 &i, const dim3 &bound) {
 }
 
 void gpgpu_sim::launch(kernel_info_t *kinfo) {
+  if (kinfo->cluster_barriers().enabled()) {
+    if (m_config.max_concurrent_kernel != 1 ||
+        m_shader_config->gpgpu_concurrent_kernel_sm) {
+      fprintf(stderr, "Cluster barrier execution requires single-kernel replay "
+                      "(-gpgpu_max_concurrent_kernel 1 -gpgpu_concurrent_kernel_sm 0)\n");
+      exit(1);
+    }
+    const unsigned capacity = m_shader_config->num_shader() *
+                              m_shader_config->max_cta(*kinfo);
+    if (capacity < kinfo->cluster_barriers().max_ctas_per_cluster()) {
+      fprintf(stderr, "Cluster barrier requires %u resident CTAs, config capacity is %u\n",
+              kinfo->cluster_barriers().max_ctas_per_cluster(), capacity);
+      exit(1);
+    }
+  }
   unsigned kernelID = kinfo->get_uid();
   unsigned long long streamID = kinfo->get_streamID();
 
@@ -1643,6 +1658,9 @@ void gpgpu_sim::print_stats(unsigned long long streamID) {
 
 void gpgpu_sim::deadlock_check() {
   if (m_config.gpu_deadlock_detect && gpu_deadlock) {
+    for (auto *kernel : m_running_kernels)
+      if (kernel && kernel->cluster_barriers().enabled())
+        kernel->cluster_barriers().dump(stderr);
     fflush(stdout);
     printf(
         "\n\nGPGPU-Sim uArch: ERROR ** deadlock detected: last writeback core "
